@@ -1,0 +1,18 @@
+# Galaxy S10 5G: Wi-Fi at boot — the PCIe channel 0 host (pcie-exynos9820)
+# and brcmfmac with its BCM4375 patch; NetworkManager joins the network, as
+# on upstream ztOS (README "With a desktop: NetworkManager owns Wi-Fi"), so
+# ztMETRO's Settings and status bar see it through nmcli.
+# Added for OmonullOS, October 2026.
+[Unit]
+Description=zboot (Galaxy S10 5G): Wi-Fi (PCIe channel 0, BCM4375)
+After=zboot-guards.service
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/modprobe pcie-exynos9820
+ExecStart=/usr/bin/modprobe brcmfmac
+
+[Install]
+WantedBy=multi-user.target

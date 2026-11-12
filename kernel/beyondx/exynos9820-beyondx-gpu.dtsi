@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: the Mali-G76 for Panfrost, included by scripts/build-boot.sh
+ * --device beyondx --gpu.
+ *
+ * Added for OmonullOS, October 2026. Panfrost is built as a module and
+ * loaded by hand while this is tested; the G3D power domain and its 156 MHz
+ * clock are S-Boot's (exynos9820.dtsi, g3d_clk).
+ */
+
+&gpu {
+	status = "okay";
+};

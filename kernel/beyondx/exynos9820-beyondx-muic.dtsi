@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: the I2C bus to the MAX77705, included by
+ * scripts/build-boot.sh --device beyondx --muic.
+ *
+ * Added for OmonullOS, October 2026. Tested on the phone (bx8). No client
+ * drivers: initramfs reaches the chip from user space (i2c-dev), first only
+ * to read it, then to close its MUIC switch onto the AP's USB PHY
+ * (kernel/beyondx/pre-usb.sh). The bus driver is a module, loaded once the
+ * CMGP side has been checked.
+ */
+
+&hsi2c_cmgp3 {
+	status = "okay";
+};

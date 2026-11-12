@@ -1,0 +1,19 @@
+# Galaxy S10 5G: Panfrost and the DECON scanout (bx-decon) loaded, the
+# Mali-G76 at 572 MHz (S-Boot leaves 156), stepped down to 260 MHz while the
+# G3D sensors read 75 C or more (zgpu). Added for OmonullOS, October 2026 (the owner asked for it at every
+# boot).
+[Unit]
+Description=zboot (Galaxy S10 5G): Panfrost, DECON, G3D 572 MHz and its heat guard
+After=zboot-guards.service
+# the session's wlroots uses Panfrost and DECON only if they are there first
+Before=greetd.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/bin/zgpu load
+ExecStart=/usr/local/bin/zgpu 572
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

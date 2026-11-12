@@ -1,0 +1,126 @@
+diff -ru nullgram.bak-safe/nullgram.py nullgram/nullgram.py
+--- nullgram.bak-safe/nullgram.py	2026-11-10 03:33:16.000000000 +0500
++++ nullgram/nullgram.py	2026-11-10 17:25:56.862233055 +0500
+@@ -391,6 +391,42 @@
+ 	ms = Property(int, lambda self: self._ms, notify=changed)
+ 
+ 
++class Safe(QObject):
++	"""How far from the bottom edge our buttons keep (iOS's safe area): over ztMETRO's nav line the
++	shell gives us the whole height, with no strip of our colour under us, once told we keep clear of
++	the line ourselves ("safe area"). It writes $XDG_RUNTIME_DIR/ztos-safe ("bottom N", points) at
++	every config load; 0 with the buttons, or a shell that has no line."""
++	changed = Signal()
++
++	def __init__(self):
++		super().__init__()
++		run = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
++		self._path = os.path.join(run, "ztos-safe")
++		self._bottom = 0
++		try:
++			fd = os.open(os.path.join(run, "ztmetro.ctl"), os.O_WRONLY | os.O_NONBLOCK)
++			os.write(fd, b"safe area ztos.uz.omonullos.nullgram\n")
++			os.close(fd)
++		except OSError:
++			pass
++		self._watch = QFileSystemWatcher([run])
++		self._watch.directoryChanged.connect(self._read)
++		self._read()
++
++	def _read(self, *_):
++		try:
++			with open(self._path) as f:
++				key, n = f.read().split()
++			n = max(0, min(int(n), 60)) if key == "bottom" else 0
++		except (OSError, ValueError):
++			return
++		if n != self._bottom:
++			self._bottom = n
++			self.changed.emit()
++
++	bottom = Property(int, lambda self: self._bottom, notify=changed)
++
++
+ class Meter(QObject):
+ 	"""How loud the microphone is while a voice note records (Telegram-iOS's blob round the mic grows with
+ 	it): the default input read beside the recorder (QAudioSource, 16 kHz mono), its loudest sample of
+@@ -1353,6 +1389,8 @@
+ 	view.rootContext().setContextProperty("td", td)
+ 	osk = Osk()
+ 	view.rootContext().setContextProperty("osk", osk)
++	safe = Safe()
++	view.rootContext().setContextProperty("safe", safe)
+ 	ink = Ink()
+ 	view.rootContext().setContextProperty("ink", ink)
+ 	meter = Meter()
+diff -ru nullgram.bak-safe/qml/ChatPage.qml nullgram/qml/ChatPage.qml
+--- nullgram.bak-safe/qml/ChatPage.qml	2026-11-10 03:39:51.000000000 +0500
++++ nullgram/qml/ChatPage.qml	2026-11-10 17:38:05.891990264 +0500
+@@ -105,7 +105,8 @@
+     }
+     // a post's comments: chatId is then the channel's discussion group and this its thread there
+     property var thread: 0
+-    readonly property real foot: selecting ? pickBar.height : searching ? findBar.height : input.visible ? input.height : chanBar.height    // what is under the messages
++    readonly property real foot: (selecting ? pickBar.height : searching ? findBar.height : input.visible ? input.height : chanBar.height) + safe.bottom    // what is under the messages
++    readonly property real barLift: Math.max(kb, safe.bottom)    // the bars: over the keyboard, or clear of the shell's nav line
+     readonly property real toastFloor: kb + foot    // (Main's Toast stands over it)
+     function isMuted() {
+         const n = chat ? chat.notification_settings : null
+@@ -3804,10 +3805,11 @@
+             z: 2
+             visible: page.searching
+             anchors.bottom: parent.bottom
+-            transform: Translate { y: -page.kb }
++            transform: Translate { y: -page.barLift }
+             width: parent.width; height: 52
+             color: Theme.bar
+             MouseArea { anchors.fill: parent }
++            Rectangle { y: parent.height; width: parent.width; height: page.barLift - page.kb; color: Theme.bar }    // on to the edge
+             Rectangle { width: parent.width; height: 0.5; color: Theme.separator }
+             Row {
+                 x: 8; anchors.verticalCenter: parent.verticalCenter
+@@ -3999,6 +4001,7 @@
+             z: 1
+             visible: !page.canPost && !page.searching && !page.selecting
+             anchors.bottom: parent.bottom
++            transform: Translate { y: -page.barLift }
+             width: parent.width
+             height: visible ? 60 : 0
+             Glass {
+@@ -4058,6 +4061,7 @@
+             z: 1
+             visible: page.selecting
+             anchors.bottom: parent.bottom
++            transform: Translate { y: -page.barLift }
+             width: parent.width
+             height: visible ? 60 : 0
+             Glass {
+@@ -4105,7 +4109,7 @@
+             z: 1
+             visible: page.canPost && !page.searching && !page.selecting
+             anchors.bottom: parent.bottom
+-            transform: Translate { y: -page.kb }
++            transform: Translate { y: -page.barLift }
+             width: parent.width
+             height: visible ? compose.height + Math.max(60, field.contentHeight + 38) : 0
+             onHeightChanged: if (list.down && !scroll.running) Qt.callLater(list.positionViewAtBeginning)
+diff -ru nullgram.bak-safe/qml/HomePage.qml nullgram/qml/HomePage.qml
+--- nullgram.bak-safe/qml/HomePage.qml	2026-11-10 03:33:16.000000000 +0500
++++ nullgram/qml/HomePage.qml	2026-11-10 17:25:56.863298363 +0500
+@@ -11,12 +11,14 @@
+     ChatListPage { id: chats; store: home.store; nav: home.nav; player: home.player; visible: home.tab === 1 }
+     SettingsPage { id: settings; store: home.store; nav: home.nav; visible: home.tab === 2 }
+ 
+-    readonly property real toastFloor: tabs.visible ? tabs.height + 10 : 0    // (Main's Toast stands over it)
++    readonly property real toastFloor: tabs.visible ? tabs.height + tabs.gap : 0    // (Main's Toast stands over it)
+ 
+     TabBar {
+         id: tabs
+         x: 16; width: parent.width - 32
+-        y: parent.height - height - 10
++        // over the shell's nav line: clear of it (its safe area), as on iOS
++        readonly property real gap: safe.bottom > 0 ? safe.bottom + 4 : 10
++        y: parent.height - height - gap
+         visible: !(home.tab === 1 && chats.searching)
+         current: home.tab
+         badges: [0, chats.unreadChats, 0]

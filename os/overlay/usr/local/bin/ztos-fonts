@@ -1,0 +1,46 @@
+#!/bin/sh
+# ztos-fonts: fetch ztOS's Segoe fonts for this user.
+#
+# Added for OmonullOS, November 2026. Segoe UI, Segoe UI Symbol and Segoe MDL2
+# Assets are Microsoft's: omonullOS does not ship them. Upstream ztOS keeps
+# them in its public repository, so they are downloaded from there, at a
+# pinned commit, and each file is checked against its sha256 before anything
+# is installed. They go among the user's own fonts (no password). Then the
+# app list draws the system apps' glyphs again (ztapps); Start and the UI
+# font change when the phone is restarted.
+#
+# Used by Settings > theme > "download from ztOS". Prints one last line:
+# "ok" or "error: <why>". See docs/s10-5g/FONTS.md.
+set -u
+COMMIT=714765708075e87634daa5864ef7935a0895e62f
+BASE="https://raw.githubusercontent.com/Zerone-Laboratories/ztOS/$COMMIT/os/overlay/usr/local/share/fonts/segoe"
+DEST="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/ztos-segoe"
+
+TMP=$(mktemp -d) || { echo "error: no temporary folder"; exit 1; }
+trap 'rm -rf "$TMP"' EXIT
+
+while read -r sum name; do
+	[ -n "$name" ] || continue
+	if ! curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$TMP/$name" "$BASE/$name"; then
+		echo "error: download failed ($name)"
+		exit 1
+	fi
+	if ! echo "$sum  $TMP/$name" | sha256sum -c --status; then
+		echo "error: wrong file ($name)"
+		exit 1
+	fi
+done <<EOF
+d2f8326a354456d93e78b0537c58793e7072c3617af7d9ee187f10d6d595f510 seguisym.ttf
+445068e801041d250f0022090dcb3d680cf6b823ea365830d1108bc557cea1d4 segoeui.ttf
+b0f79695e485398912401c2af7b5b91c45f5c847633b4d871441484a835df547 segoeuib.ttf
+6191ced0ab0ac774283ecfa55c7b50c0c3d7fe54426893cb5405852489ff269b segoeuil.ttf
+3cf2f2262eb6c06c2a0671d1b8ba01698babc7d3c932113f81cb8dbaa2f13821 segoeuisl.ttf
+095a98c465aae75c2078267faf73a29a11ea9fb71e57b4b6145f234f79eb4079 seguisb.ttf
+da0f727e42c8fecd547573ce8d6796a9564c4e884bac260d4aeb86cf0a455b9a SegMDL2.ttf
+EOF
+
+mkdir -p "$DEST" && cp -f "$TMP"/*.ttf "$DEST/" || { echo "error: could not copy the fonts"; exit 1; }
+fc-cache -f "$DEST" >/dev/null 2>&1
+rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/ztmetro/icons"/segoe-v1-*.a8
+(ztapps --once >/dev/null 2>&1 &)
+echo ok

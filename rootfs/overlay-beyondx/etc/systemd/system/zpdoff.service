@@ -1,0 +1,13 @@
+# Galaxy S10 5G: power down the SoC blocks we never use (NPU, DSP, ISP,
+# IVA, MFC, G2D, VRA2). Added for OmonullOS, October 2026 (the owner asked).
+[Unit]
+Description=zboot (Galaxy S10 5G): power down unused SoC blocks
+After=zboot-guards.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/zpdoff
+
+[Install]
+WantedBy=multi-user.target

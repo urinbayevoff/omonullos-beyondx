@@ -1,0 +1,3 @@
+obj-m += zrn-sleep-check-bx.o zrn-system-sleep-bx.o
+zrn-sleep-check-bx-y := zrn-sleep-check-bx-main.o sequence.o
+zrn-system-sleep-bx-y := zrn-system-sleep-bx-main.o sequence.o

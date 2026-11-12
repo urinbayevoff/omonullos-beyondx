@@ -1,0 +1,29 @@
+# Properties Android's init sets at boot (from S-Boot's androidboot.* and
+# init's own), for zprops; build.prop files come before this one.
+# Added for OmonullOS, October 2026.
+ro.boot.hardware=exynos9820
+ro.hardware=exynos9820
+ro.boot.bootloader=G977NKSU6HWD3
+ro.bootloader=G977NKSU6HWD3
+ro.boot.carrierid=KOO
+ro.boot.em.model=SM-G977N
+ro.boot.revision=9
+ro.revision=9
+ro.boot.serialno=0000000000
+ro.serialno=0000000000
+ro.boot.dram_info=01,07,00,8G
+ro.boot.debug_level=0x4f4c
+ro.boot.warranty_bit=1
+ro.boot.verifiedbootstate=orange
+ro.boot.selinux=permissive
+ro.boot.hardware.revision=9
+ro.csc.sales_code=KOO
+ro.csc.country_code=KOREA
+ro.csc.countryiso_code=KR
+ro.csc.omcnw_code=KOO
+ro.vendor.multisim.simslotcount=1
+persist.radio.multisim.config=ss
+ro.telephony.default_network=9
+ro.baseband=mp
+ro.debuggable=1
+log.tag=V

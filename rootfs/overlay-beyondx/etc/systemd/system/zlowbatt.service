@@ -1,0 +1,13 @@
+# Galaxy S10 5G: power off at 3 % / 3.4 V while discharging, before the
+# battery runs flat. Added for OmonullOS, October 2026 (the owner asked).
+[Unit]
+Description=zboot (Galaxy S10 5G): power off on a low battery
+After=zboot-guards.service
+
+[Service]
+ExecStart=/usr/local/bin/zlowbatt
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

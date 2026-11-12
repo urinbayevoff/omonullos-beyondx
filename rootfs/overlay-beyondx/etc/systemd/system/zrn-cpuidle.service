@@ -1,0 +1,15 @@
+[Unit]
+Description=Idle cores power down (zrn-cpuidle-bx): not enabled until `zrn-cpuidle keep`
+# From upstream ztOS's zrn-cpuidle.service; OmonullOS, October 2026.
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zrn-cpuidle start
+# A clean shutdown proves the load did not freeze the phone, even inside the
+# two minutes the confirmation timer waits.
+ExecStop=/bin/rm -f /var/lib/zrn-cpuidle/loading
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,2 @@
+obj-m += zrn-cpuidle-bx.o
+zrn-cpuidle-bx-y := zrn-idle-bx.o zrn-sicd-bx.o

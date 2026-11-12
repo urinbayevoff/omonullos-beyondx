@@ -1,0 +1,4 @@
+# built by build.sh from a copy: abox.c = snd-zrn-abox-bx.c, cs35l41-lib.c =
+# the kernel's sound/soc/codecs/cs35l41-lib.c (no ASoC in this kernel)
+obj-m += snd-zrn-abox-bx.o
+snd-zrn-abox-bx-y := abox.o cs35l41-lib.o

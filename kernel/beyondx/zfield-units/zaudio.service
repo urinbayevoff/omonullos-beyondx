@@ -1,0 +1,22 @@
+[Unit]
+Description=zboot (Galaxy S10 5G): speaker and earpiece (ABOX DSP + CS35L40)
+After=local-fs.target systemd-udevd.service
+# PipeWire (in the session greetd starts) opens the card once, at start; the
+# DSP answers slowly for a few seconds after loading (EBUSY), so wait
+Before=greetd.service display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/root/tools/zaudio-load.sh
+# the DSP's VSS loop slows messages for a few seconds after boot
+# /etc/zaudio.env: RT_WBITS/RT_RBITS (WDMA3/RDMA7 widths, see the driver) and
+# RT_WCH/SIFS0_CH (WDMA3's and SIFS0's channels, 2 or 4), VOL (Speaker Playback Volume raw, 0.125 dB steps from -102 dB: 656 = -20 dB)
+EnvironmentFile=-/etc/zaudio.env
+ExecStartPost=/bin/sh -c 'sleep 6; P=/sys/module/snd_zrn_abox_bx/parameters; \
+	echo $${RT_WBITS:-24} >$$P/rt_wbits; echo $${RT_RBITS:-32} >$$P/rt_rbits; \
+	echo $${RT_WCH:-2} >$$P/rt_wch; echo $${SIFS0_CH:-2} >$$P/sifs0_ch; \
+	amixer -q -c0 cset numid=1 $${VOL:-656}; alsactl store'
+
+[Install]
+WantedBy=multi-user.target

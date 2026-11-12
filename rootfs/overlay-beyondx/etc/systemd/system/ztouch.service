@@ -1,0 +1,15 @@
+# Galaxy S10 5G: the touchscreen's rails on and its driver bound, before the
+# shell starts. Added for OmonullOS, October 2026. Not enabled by the image
+# build: switching the rails at every boot needs the owner's «ha».
+[Unit]
+Description=zboot (Galaxy S10 5G): touchscreen power and driver
+Before=greetd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ztouch on
+ExecStop=/usr/local/bin/ztouch off
+
+[Install]
+WantedBy=multi-user.target

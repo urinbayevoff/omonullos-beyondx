@@ -1,0 +1,17 @@
+# Galaxy S10 5G: the CPU clusters follow the load through zgov (zacpm's DVFS:
+# fvmap levels only, the APM picks the voltage), from the stock DT min-freq up
+# to 1950 / 2210 / 2340 MHz. The fixed levels this unit used to set kept the
+# phone hot and drained it at idle (2026-10-18).
+# Added for OmonullOS, October 2026 (the owner asked for it at every boot).
+[Unit]
+Description=zboot (Galaxy S10 5G): CPU frequency governor (zgov)
+After=zboot-guards.service
+
+[Service]
+ExecStart=/usr/local/bin/zgov
+Restart=on-failure
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

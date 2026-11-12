@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: the side keys, included by scripts/build-boot.sh --device
+ * beyondx --keys.
+ *
+ * Added for OmonullOS, October 2026. Stock dtbo 08 gpio_keys: volume up
+ * gpa0-3, volume down gpa0-4, Bixby gpa0-6 (stock KEY_WINK 0x2bf, Samsung's
+ * own code; KEY_ASSISTANT here), power gpa2-4, all on the ALIVE controller,
+ * function 0xf (EINT), no pull, debounce 10 ms. Read on
+ * bx25 with nothing pressed: gpa0 DAT 0x5e, gpa2 DAT 0x14, i.e. all four
+ * high, so active low. systemd-logind must not act on KEY_POWER (rootfs
+ * overlay: HandlePowerKey=ignore); ztMETRO takes it for the screen.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+
+&pinctrl_alive {
+	status = "okay";
+
+	key_pins: key-pins {
+		samsung,pins = "gpa0-3", "gpa0-4", "gpa0-6", "gpa2-4";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+/ {
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&key_pins>;
+
+		key-volup {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&gpa0 3 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+
+		key-voldown {
+			label = "Volume Down";
+			linux,code = <KEY_VOLUMEDOWN>;
+			gpios = <&gpa0 4 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+
+		key-bixby {
+			label = "Bixby";
+			linux,code = <KEY_ASSISTANT>;
+			gpios = <&gpa0 6 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+
+		key-power {
+			label = "Power";
+			linux,code = <KEY_POWER>;
+			gpios = <&gpa2 4 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+			wakeup-source;
+		};
+	};
+};

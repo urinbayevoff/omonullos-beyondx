@@ -1,0 +1,14 @@
+# Galaxy S10 5G: log the fuel gauge every 30 s (/var/lib/zbattlog), to
+# measure the drain off the cable. Added for OmonullOS, October 2026.
+[Unit]
+Description=zboot (Galaxy S10 5G): battery log
+After=zboot-guards.service
+
+[Service]
+ExecStart=/usr/local/bin/zbattlog
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

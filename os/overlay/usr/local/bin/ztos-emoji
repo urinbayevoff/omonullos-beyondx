@@ -1,0 +1,31 @@
+#!/bin/sh
+# ztos-emoji: fetch Apple Color Emoji for this user.
+#
+# Added for OmonullOS, November 2026. The artwork is Apple's, so omonullOS
+# does not ship it (Google's Noto Color Emoji is the default). It is
+# downloaded from samuelngs/apple-emoji-ttf's GitHub release, a pinned
+# version, and checked against its sha256 before it is installed among the
+# user's own fonts (no password). The phone is restarted to see it.
+#
+# Used by Settings > theme > Emoji > Apple > "download". 116 MB: meant for
+# Wi-Fi. Prints one last line: "ok" or "error: <why>". See
+# docs/s10-5g/FONTS.md.
+set -u
+URL="https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260722-484daf4e/AppleColorEmoji-Linux.ttf"
+SUM=e37c7af6265ac4a0af6d57bc65e86109a776d9966e8343334557f63da482516f
+DEST="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/apple-emoji"
+
+mkdir -p "$DEST" || { echo "error: no fonts folder"; exit 1; }
+TMP="$DEST/.AppleColorEmoji.ttf.part"
+trap 'rm -f "$TMP"' EXIT
+if ! curl -fsSL --retry 2 --connect-timeout 15 --max-time 1800 -o "$TMP" "$URL"; then
+	echo "error: download failed"
+	exit 1
+fi
+if ! echo "$SUM  $TMP" | sha256sum -c --status; then
+	echo "error: wrong file"
+	exit 1
+fi
+mv -f "$TMP" "$DEST/AppleColorEmoji.ttf" || { echo "error: could not install"; exit 1; }
+fc-cache -f "$DEST" >/dev/null 2>&1
+echo ok

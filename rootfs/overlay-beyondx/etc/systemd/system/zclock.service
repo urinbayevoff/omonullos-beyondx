@@ -1,0 +1,18 @@
+# Galaxy S10 5G: the system clock from the S2MPS19 RTC at boot (zacpm rtc),
+# which keeps time while the phone is off; there is no RTC driver yet. Each
+# boot used to start at the image's build time. The RTC is written by
+# `zacpm rtc set` when a good time comes in (the PC: scripts/bx-reboot.sh,
+# the network: zsms NITZ). Added for OmonullOS, October 2026.
+[Unit]
+Description=zboot (Galaxy S10 5G): system clock from the PMIC RTC
+DefaultDependencies=no
+After=local-fs.target
+Before=time-set.target sysinit.target
+Wants=time-set.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 't=$(/usr/local/bin/zacpm rtc --epoch) && [ "$t" -gt 1790000000 ] && date -u -s "@$t"'
+
+[Install]
+WantedBy=sysinit.target

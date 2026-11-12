@@ -1,0 +1,16 @@
+# Galaxy S10 5G: on poweroff only, with a cable in, the charger keeps charging
+# after the phone is off (zchgoff: S-Boot's limits, charger watchdog off).
+# After every other unit has stopped (zchg and the watchdog kicks among them),
+# just before systemd-poweroff. Added for OmonullOS, October 2026.
+[Unit]
+Description=zboot (Galaxy S10 5G): charge while powered off
+DefaultDependencies=no
+After=shutdown.target umount.target
+Before=systemd-poweroff.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/zchgoff
+
+[Install]
+WantedBy=poweroff.target

@@ -1,0 +1,58 @@
+#!/bin/sh
+# zrn-cpuidle (beyondx): let idle cores power down (power/idle/beyondx,
+# zrn-cpuidle-bx.ko). Upstream ztOS's zrn-cpuidle for the Exynos 9820: our
+# module, all eight cores by default (the kernel has the suspend hash fix,
+# kernel/patch-suspend-mpidr.py), no SICD. Added for OmonullOS, October 2026.
+#
+#	zrn-cpuidle try		load it now
+#	zrn-cpuidle keep	load it at every boot from now on
+#	zrn-cpuidle never	stop loading it at boot
+#	zrn-cpuidle status
+#
+# A mark is left before loading and removed two minutes after (or by a clean
+# shutdown); a boot that finds the mark does not load the module again and
+# says so (remove /var/lib/zrn-cpuidle/loading).
+D=/var/lib/zrn-cpuidle
+MARK=$D/loading
+KO=/usr/lib/modules/$(uname -r)/extra/zrn-cpuidle-bx.ko
+CPUS=${ZRN_CPUIDLE_CPUS:-0xff}
+mkdir -p $D
+
+load() {
+	[ -d /sys/module/zrn_cpuidle_bx ] && { echo "zrn-cpuidle: already loaded"; return 0; }
+	[ -e "$KO" ] || { echo "zrn-cpuidle: $KO is not installed"; return 1; }
+	if [ -e $MARK ]; then
+		echo "zrn-cpuidle: the last load did not finish (the phone froze or restarted); not loading. Remove $MARK to try again."
+		return 1
+	fi
+	S=$(awk '$3=="cpu_suspend"{print $1}' /proc/kallsyms)
+	R=$(awk '$3=="cpu_resume"{print $1}' /proc/kallsyms)
+	# more than one core in C2 needs the suspend hash fix
+	if [ "$CPUS" != 0x08 ] && [ "$CPUS" != 0x04 ] &&
+		! awk '$3=="exynos9810_suspend_mpidr_normalize"{found=1} END{exit !found}' /proc/kallsyms; then
+		echo "zrn-cpuidle: wider CPU masks need the suspend hash fix"
+		return 1
+	fi
+	[ -n "$S" ] && [ "$S" != 0000000000000000 ] || { echo "zrn-cpuidle: cpu_suspend not found (kptr_restrict?)"; return 1; }
+	[ -n "$R" ] && [ "$R" != 0000000000000000 ] || { echo "zrn-cpuidle: cpu_resume not found (kptr_restrict?)"; return 1; }
+	touch $MARK; sync
+	insmod "$KO" suspend_enter=0x$S resume=0x$R cpus=$CPUS || { rm -f $MARK; echo "zrn-cpuidle: the module did not load"; return 1; }
+	echo "zrn-cpuidle: loaded for cores $CPUS"
+	systemd-run --quiet --collect --unit=zrn-cpuidle-confirm --on-active=120 \
+		/bin/sh -c "rm -f $MARK; sync" || return 1
+}
+
+case "$1" in
+try|start) load ;;
+keep) systemctl enable zrn-cpuidle.service && echo "zrn-cpuidle: loaded at every boot from now on" ;;
+never) systemctl disable zrn-cpuidle.service; rm -f $MARK ;;
+status)
+	[ -d /sys/module/zrn_cpuidle_bx ] && echo "loaded" || echo "not loaded"
+	[ -e $MARK ] && echo "load not yet confirmed (or previous boot failed)"
+	systemctl is-enabled zrn-cpuidle.service 2>/dev/null
+	cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null
+	for c in /sys/devices/system/cpu/cpu[0-9]*/cpuidle/state1; do
+		[ -e "$c/time" ] && echo "$(echo $c | cut -d/ -f6): $(( $(cat $c/time) / 1000 )) ms asleep, $(cat $c/usage) times"
+	done ;;
+*) echo "usage: zrn-cpuidle try | keep | never | status"; exit 2 ;;
+esac

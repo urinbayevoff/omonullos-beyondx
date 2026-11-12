@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: the touchscreen, an S6SY771 at 0x48 on hsi2c_10, included
+ * by scripts/build-boot.sh --device beyondx --touch.
+ *
+ * Added for OmonullOS, October 2026. bx23: the IC answers mainline
+ * s6sy761's probe reads the way that driver wants (application mode, FW
+ * integrity 0x80, boot-complete event), so it is bound to that driver. Its
+ * rails (tsp_io LDO19M 1.8 V, tsp_avdd LDO27M 3.0 V) have no regulator
+ * driver here: the supplies are left out (dummy regulators) and the rails
+ * are switched by zacpm touch on. The probe at boot finds the IC unpowered
+ * and gives up; after zacpm touch on, bind it by hand:
+ *   echo 1-0048 > /sys/bus/i2c/drivers/s6sy761/bind
+ * The bus is set up as I2C by pre-usb.sh before i2c-exynos5 loads.
+ */
+
+&pinctrl_alive {
+	status = "okay";
+
+	/* stock attn-irq: gpa1-0 as EINT, no pull, drive 0 */
+	touch_irq: touch-irq-pins {
+		samsung,pins = "gpa1-0";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+&hsi2c_10 {
+	status = "okay";
+
+	touchscreen@48 {
+		compatible = "samsung,s6sy761";
+		reg = <0x48>;
+		interrupt-parent = <&gpa1>;
+		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&touch_irq>;
+		/* stock max_coords; the panel is 1440 x 3040 */
+		touchscreen-size-x = <4096>;
+		touchscreen-size-y = <4096>;
+	};
+};

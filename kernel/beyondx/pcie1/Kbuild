@@ -1,0 +1,6 @@
+# Galaxy S10 5G: PCIe channel 1 (the S5100 5G modem) as an external module
+# with its device tree node as an overlay (scripts/bx-pcie1-build.sh).
+# Added for OmonullOS, October 2026.
+ccflags-y += -I$(srctree)/drivers/pci/controller/dwc -I$(src)/include
+obj-m += pcie-exynos9820-ch1.o
+pcie-exynos9820-ch1-y := pcie-exynos9820-ch1-main.o pcie1_overlay_blob.o

@@ -1,0 +1,4 @@
+# Galaxy S10 5G: DECON scanout as an external module (scripts/build-boot.sh
+# --decon builds it against out-beyondx; loaded by hand while it is tested).
+# Added for OmonullOS, October 2026.
+obj-m += bx-decon.o

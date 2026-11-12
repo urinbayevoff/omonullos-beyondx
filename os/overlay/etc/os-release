@@ -1,0 +1,9 @@
+NAME="omonullOS"
+PRETTY_NAME="omonullOS BETA-1"
+ID=ztos
+ID_LIKE=arch
+VERSION_ID="0.2.0-BETA-1"
+BUILD_ID="BETA-1"
+ANSI_COLOR="38;2;0;80;239"
+HOME_URL="https://github.com/"
+LOGO=ztos

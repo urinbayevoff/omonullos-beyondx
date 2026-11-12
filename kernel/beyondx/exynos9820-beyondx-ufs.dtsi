@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: the internal UFS, included by scripts/build-boot.sh
+ * --device beyondx --ufs. Its driver is a module that only /bin/zufs loads,
+ * by hand, after reading BLK_FSYS1's clocks open (kernel/beyondx/zufs.sh).
+ *
+ * Added for OmonullOS, October 2026. Untested.
+ */
+
+&ufs {
+	status = "okay";
+};

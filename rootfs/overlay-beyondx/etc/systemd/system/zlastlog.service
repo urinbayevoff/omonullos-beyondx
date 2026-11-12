@@ -1,0 +1,19 @@
+[Unit]
+Description=Keep the kernel log of the boot before (zrn-lastlog), whatever booted between
+# After a hang the watchdog boots TWRP, which writes over pstore's ramoops.
+# zrn-lastlog (power/suspend/lastlog, from ztOS) copies every kernel line into
+# 64 KiB at 0xfeb00000: the end of Samsung's debug-snapshot ETM area, the one
+# place there that survived a watchdog reset through TWRP (2026-10-18; dbgc,
+# bcm, llc, cachedump and arraydump ends were cleared). Loading it hands over
+# the previous boot's log, saved here with this boot's pstore records.
+# Added for OmonullOS, October 2026.
+DefaultDependencies=no
+After=local-fs.target zclock.service
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'modprobe zrn-lastlog phys=0xfeb00000; d=/var/lib/zlastlog/$(date +%%Y%%m%%dT%%H%%M%%S)-$(cut -c1-8 /proc/sys/kernel/random/boot_id); mkdir -p "$d"; cp /proc/zrn-lastlog-previous "$d"/previous-boot.log 2>/dev/null; cp /sys/fs/pstore/* "$d"/ 2>/dev/null; ls -1t /var/lib/zlastlog | tail -n +21 | sed "s|^|/var/lib/zlastlog/|" | xargs -r rm -rf'
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Start's Terminal tile (welcome app) asks for gnome-terminal; foot is the
+# phone's terminal. "gnome-terminal -- cmd args" -> "foot cmd args".
+[ "$1" = "--" ] && shift
+exec foot "$@"

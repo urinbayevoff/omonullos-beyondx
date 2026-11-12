@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Samsung Galaxy S10 5G (beyondx, SM-G977N): stage 3, the first boot.
+ *
+ * Added for OmonullOS, October 2026. Untested on the phone. The goal is the
+ * kernel log on the screen through the bootloader's framebuffer, nothing
+ * else. Where the numbers come from (docs/s10-5g/hardware.md):
+ *
+ *  - stock beyondx dt.img and dtbo.img index 8 (this phone's board): every
+ *    static reserved region below;
+ *  - a live device tree of the Galaxy S10 (beyond1lte, the same SoC and
+ *    bootloader family) in Project-Silicium/Mu-Silicium, Resources/DTBs:
+ *    the regions S-Boot adds at boot (el2_code, kaslr) and the holes it
+ *    leaves in the memory map (0xbab00000-0xc0000000, 0xe0000000-0xe1900000);
+ *  - Mu-Silicium's beyond1lte memory map and uniLoader's beyond1lte board:
+ *    the framebuffer at 0xca000000.
+ *
+ * Checked on this phone (2026-10-16, TWRP, root): its live tree has the same
+ * memory banks and holes, el2_code at 0x87000000, kaslr at 0x80001000 and
+ * el2_earlymem at 0x9fd800000, and S-Boot passes s3cfb.bootloaderfb=0xca000000
+ * on the kernel command line.
+ *
+ * Memory: only the low 1.4 GB, on purpose. The 6 GB above 0x880000000
+ * holds el2_earlymem (0x9fd800000 on beyond1lte) and is left out until the
+ * live tree says where everything is.
+ */
+
+/dts-v1/;
+#include "exynos9820.dtsi"
+
+/ {
+	model = "Samsung Galaxy S10 5G (SM-G977N)";
+	compatible = "samsung,beyondx", "samsung,exynos9820";
+	chassis-type = "handset";
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+
+		framebuffer@ca000000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xca000000 (1440 * 3040 * 4)>;
+			width = <1440>;
+			height = <3040>;
+			stride = <(1440 * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x3ab00000>,
+		      <0x0 0xc0000000 0x20000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+
+		/* what the bootloader shows, and we draw on */
+		framebuffer@ca000000 {
+			reg = <0x0 0xca000000 0x1400000>;
+			no-map;
+		};
+
+		/*
+		 * Samsung's pstore, with the stock kernel's parameters (read
+		 * from /sys/module/ramoops under TWRP): one 16 KB oops record
+		 * and 16 KB of pmsg, no console. The same layout lets TWRP's
+		 * kernel show our panic log in /sys/fs/pstore after the reset.
+		 * Outside the memory we give Linux, so it is mapped as I/O.
+		 * The first 16 KB hold the console instead of the oops record
+		 * (ramoops puts dmesg records, then the console, then pmsg):
+		 * the same offsets, and the console also catches a boot that
+		 * hangs before user space, which an oops record does not
+		 * (2026-10-18, cold boots after power off).
+		 */
+		ramoops@eb308000 {
+			compatible = "ramoops";
+			reg = <0x0 0xeb308000 0x8000>;
+			record-size = <0x0>;
+			pmsg-size = <0x4000>;
+			console-size = <0x4000>;
+			ecc-size = <0x0>;
+		};
+
+		/* stock dt.img */
+		sec-debug-magic@80000000 {
+			reg = <0x0 0x80000000 0x1000>;
+			no-map;
+		};
+
+		seclog@c0000000 {
+			reg = <0x0 0xc0000000 0x80000>;
+			no-map;
+		};
+
+		/* added by S-Boot at boot (beyond1lte's live tree) */
+		kaslr@80001000 {
+			reg = <0x0 0x80001000 0x1000>;
+			no-map;
+		};
+
+		/* Samsung's EL2 hypervisor (uH/RKP) */
+		el2-code@87000000 {
+			reg = <0x0 0x87000000 0x200000>;
+			no-map;
+		};
+
+		/* stock dtbo.img index 8 */
+		secure-camera@96000000 {
+			reg = <0x0 0x96000000 0x2200000>;
+			no-map;
+		};
+
+		camera-contig@98200000 {
+			reg = <0x0 0x98200000 0xe00000>;
+			no-map;
+		};
+
+		modem-spare@d0000000 {
+			reg = <0x0 0xd0000000 0x1600000>;
+			no-map;
+		};
+
+		modem-if2@d1600000 {
+			reg = <0x0 0xd1600000 0x4200000>;
+			no-map;
+		};
+
+		cp2cp-shm@d5800000 {
+			reg = <0x0 0xd5800000 0x4000000>;
+			no-map;
+		};
+
+		s5100-msi@d9800000 {
+			reg = <0x0 0xd9800000 0x1000>;
+			no-map;
+		};
+
+		/*
+		 * Left out: mm_debug (0x91200000, one page of Samsung's
+		 * debugging, inside where uniLoader puts the kernel at
+		 * 0x90000000) and camera (0x99000000, an ion heap the stock
+		 * kernel lets go of when the camera is off).
+		 */
+	};
+
+	/*
+	 * Power off as Samsung's exynos-reboot.c / sec_reboot.c do: drop
+	 * PS_HOLD (PMU PS_HOLD_CONTROL 0x30c, PS_HOLD_EN bit 8) and the
+	 * S2MPS19 cuts the rails. Without it poweroff stopped at "System
+	 * halted" with the SoC up until the watchdog reset into TWRP; a
+	 * system-shutdown hook doing the same write did not take
+	 * (2026-10-18). With a charger in, the PMIC powers up again (S-Boot
+	 * charging), as on stock.
+	 */
+	poweroff {
+		compatible = "syscon-poweroff";
+		regmap = <&pmu_system_controller>;
+		offset = <0x30c>;
+		mask = <0x100>;
+		value = <0x0>;
+	};
+};

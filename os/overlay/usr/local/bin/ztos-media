@@ -1,0 +1,15 @@
+#!/bin/sh
+# ztos-media: ask the system to fetch ztOS's wallpapers and ringtones.
+#
+# Added for OmonullOS, November 2026. The download runs as root in
+# ztos-media.service (/usr/local/libexec/ztos-media-fetch: pinned upstream
+# commit, sha256 checked); polkit lets the phone's owner start it without a
+# password. This waits for it and prints its last line: "ok" or "error: <why>".
+# Used by Settings > theme. See docs/s10-5g/FONTS.md.
+systemctl start ztos-media.service 2>/dev/null
+st=$(tail -n1 /run/ztos-media.status 2>/dev/null)
+case "$st" in
+ok) echo ok ;;
+"error: "*) echo "$st" ;;
+*) echo "error: the download did not start" ;;
+esac

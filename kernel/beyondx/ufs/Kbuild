@@ -1,0 +1,6 @@
+# Galaxy S10 5G: the UFS host as an external module (scripts/build-boot.sh
+# --ufs builds it against out-beyondx; kernel/beyondx/zufs.sh loads it).
+# Added for OmonullOS, October 2026.
+ccflags-y += -I$(srctree)/drivers/ufs/host
+obj-m += ufs-exynos9820.o
+ufs-exynos9820-y := exynos9820-ufs.o ufs-cal-9820.o

@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: DECON_F, the display controller S-Boot leaves scanning out
+ * its framebuffer, for kernel/beyondx/decon (bx-decon, a module loaded by
+ * hand), included by scripts/build-boot.sh --device beyondx --decon.
+ *
+ * Added for OmonullOS, October 2026. From the stock tree: decon_f@0x19030000
+ * (interrupts SPI 183 frame start, 184 frame done, 189 extra; not used by
+ * the driver yet) and the DPU_DMA block 0x19070000 whose IDMA pages the dpp
+ * nodes name (0x19071000..0x19076000).
+ */
+
+&soc {
+	decon: decon@19030000 {
+		compatible = "samsung,exynos9820-decon";
+		reg = <0x19030000 0x10000>, <0x19070000 0x7000>;
+		interrupts = <GIC_SPI 183 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 184 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 189 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "frame_start", "frame_done", "extra";
+	};
+};

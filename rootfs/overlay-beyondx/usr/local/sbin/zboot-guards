@@ -1,0 +1,23 @@
+#!/bin/sh
+# Galaxy S10 5G: after switch_root, run the guards initramfs ran, from the
+# same scripts (kernel/beyondx, installed into /usr/local by
+# scripts/build-arch-root.sh --device beyondx): the uniLoader watchdog pet
+# and the charger watchdog kick (wdt-pet.sh), zthermal and zchg. initramfs
+# stops its zchg and zthermal before switch_root; its pet loop may live on,
+# a second reload does no harm. touch /run/zboot.nopet still stops the pet
+# (/run is the same tmpfs). devmem and the i2c tools are busybox's.
+#
+# Added for OmonullOS, October 2026.
+
+log() {
+	echo "zboot| $*" > /dev/kmsg 2>/dev/null
+}
+
+arg() {
+	sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" /proc/cmdline
+}
+
+ZBIN=/usr/local/bin
+. /usr/local/lib/zboot/wdt-pet.sh
+# the loops above run in the background; this stays their main process
+wait

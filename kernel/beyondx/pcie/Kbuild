@@ -1,0 +1,5 @@
+# Galaxy S10 5G: the Wi-Fi PCIe host (channel 0) as an external module
+# (scripts/build-boot.sh --wlan builds it against out-beyondx; loaded by hand
+# while it is tested). Added for OmonullOS, October 2026.
+ccflags-y += -I$(srctree)/drivers/pci/controller/dwc
+obj-m += pcie-exynos9820.o

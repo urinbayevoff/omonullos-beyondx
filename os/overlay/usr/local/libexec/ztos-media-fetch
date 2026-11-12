@@ -1,0 +1,68 @@
+#!/bin/sh
+# ztos-media-fetch: fetch ztOS's wallpapers and ringtones (root, from ztos-media.service).
+#
+# Added for OmonullOS, November 2026. ztOS's media set (Nokia and Lumia
+# wallpapers, Windows Phone ringtones and keyboard sounds) belongs to
+# Microsoft and Nokia: omonullOS's public repository does not carry it.
+# Upstream ztOS keeps it in its public repository (prebuilts/ztos-media,
+# 23 parts), so it is downloaded from there at a pinned commit; every part is
+# checked against its sha256 before anything is unpacked. Only
+# usr/local/share/backgrounds and usr/local/share/sounds are unpacked, and no
+# file already on the phone is replaced (our own wallpapers and ringtone stay).
+#
+# Settings > theme > "download" starts ztos-media.service (polkit: the phone's
+# owner, no password). The last line of /run/ztos-media.status is "ok",
+# "busy" or "error: <why>". See docs/s10-5g/FONTS.md.
+set -u
+COMMIT=b3bff4734727cea7e6d9c5092abdce415516daf2
+BASE="https://raw.githubusercontent.com/Zerone-Laboratories/ztOS/$COMMIT/prebuilts/ztos-media"
+STATUS=/run/ztos-media.status
+MARK=/usr/local/share/backgrounds/ztos/.ztos-media
+
+say() { echo "$1" > "$STATUS"; chmod 644 "$STATUS"; echo "$1"; }
+fail() { say "error: $1"; exit 1; }
+say busy
+
+# 184 MB of parts, then ~215 MB unpacked
+free=$(df -Pk /var/tmp | awk 'NR==2 {print $4}')
+[ "${free:-0}" -gt 460000 ] || fail "not enough free space (450 MB needed)"
+TMP=$(mktemp -d /var/tmp/ztos-media.XXXXXX) || fail "no temporary folder"
+trap 'rm -rf "$TMP"' EXIT
+
+while read -r sum name; do
+	[ -n "$name" ] || continue
+	curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 -o "$TMP/$name" "$BASE/$name" ||
+		fail "download failed ($name)"
+	echo "$sum  $TMP/$name" | sha256sum -c --status || fail "wrong file ($name)"
+done <<SUMS
+29fc54b89a302ec8f9962d9027cc233aad677ca4a16b42d6f224ea0ee0ca1254 ztos-media.tar.xz.partaa
+0842c5d871b2b71c39aff3e1399e8d972e4997bac712281731dd15ea178cef79 ztos-media.tar.xz.partab
+baecb8a56c564c78f17fd9b541718c38997dfb17dae11db37884a41610bea3ca ztos-media.tar.xz.partac
+146aab29832f5578e1962106d9103492feb9b7933623dcfc351e3f4f76c521f5 ztos-media.tar.xz.partad
+7132639b17f7c68a272d8b39d77dd5bb72fd76f29bdd12ed142d7a459de3a7fc ztos-media.tar.xz.partae
+e8e4c8b9929001a1c11bd4b5eda780d84b8d8333f0fd29de4cc6242288e8dfe5 ztos-media.tar.xz.partaf
+a3e6de95d7264a3b2dcd5334b399f167e7da32f4cca5d0aaba51d87adadbc611 ztos-media.tar.xz.partag
+d7ea51fdc54269d200e6c575f93a491d26099eeabd2f03216eafebe986d38744 ztos-media.tar.xz.partah
+40f750aa33900f600b3fd1c6a95071ec78076711a4a94dbe1d63257a13fc31ec ztos-media.tar.xz.partai
+a2e711f34a00f1d334993ad259a05a45efb693f9583a02b9ad66db3bed64758e ztos-media.tar.xz.partaj
+c08a86bf00ff4f2e64ffb43adc1bcbc383b5d0384a8ed5588529541d5188aba4 ztos-media.tar.xz.partak
+fb98191b41a960df9d2700800991a55dd33a20dcef9d559f4d3780451a1e21b2 ztos-media.tar.xz.partal
+d79b90494cd9224efa35142ff4211094c7a6f9be47ad3c9a3a8b4c7c2dbc4a6c ztos-media.tar.xz.partam
+9889d5b38418478b46a0ff965becbcfb6b381ae2d50e7cc9c69cb58cbe8d506c ztos-media.tar.xz.partan
+80fa48ac97302563122a717e79605204b3a3b3d32f123495143e05a702654028 ztos-media.tar.xz.partao
+2c49e1f93a75f279bdb3152eadcc9ec997978230c07393f83f75ffec86e805c8 ztos-media.tar.xz.partap
+0073e6a554de5ddec820b3c472de9152f2073cfd37949b613651ec44f4cb0ba5 ztos-media.tar.xz.partaq
+329933103fe9143022f2bd4150f3fd2105cd4ccc46dc1bcc8b1e1bc9ec0308d3 ztos-media.tar.xz.partar
+b86a11c6a3f7270316a53b4becca95114776c87ed83b6ff53a451e867e33c3d2 ztos-media.tar.xz.partas
+4c1412c1d00d679ef0fd07878e3f55100eed9d97aacab17103375a55f4d64f97 ztos-media.tar.xz.partat
+efeb0f8905e64beda9a9757e408cbdef92d011797516112e855b5a8b04a06899 ztos-media.tar.xz.partau
+1211dc4deea00fe4e7fe1ce62b60c494b2284e8b85ebd725162b258931bb8f2e ztos-media.tar.xz.partav
+6aa8cb94cc17646d02cea6b5e30266aa3b2708ccd050e6292d3ebe028a470254 ztos-media.tar.xz.partaw
+SUMS
+
+cat "$TMP"/ztos-media.tar.xz.part* | tar -C / --no-same-owner --no-same-permissions --skip-old-files \
+	-xJf - usr/local/share/backgrounds usr/local/share/sounds ||
+	fail "could not unpack"
+chmod -R a+rX /usr/local/share/backgrounds/ztos /usr/local/share/sounds/ztos
+echo "$COMMIT" > "$MARK"
+say ok

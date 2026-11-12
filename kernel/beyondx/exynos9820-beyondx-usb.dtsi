@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: the USB device port, included by scripts/build-boot.sh
+ * --device beyondx --usb.
+ *
+ * Added for OmonullOS, October 2026. Tested on the phone (bx8). Peripheral only
+ * (the stock tree says otg; there is no role switch or MUIC driver yet) and
+ * high speed only. The PHY's supplies (S2MPS19 LDO10-12, stock "ldo_number")
+ * have no mainline driver: this works only if S-Boot leaves them on.
+ */
+
+&usbdrd {
+	status = "okay";
+};
+
+&usbdrd_dwc3 {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+};
+
+&usbdrd_phy {
+	status = "okay";
+};

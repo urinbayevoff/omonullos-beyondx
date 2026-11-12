@@ -1,0 +1,478 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Samsung Exynos 9820: the least that boots. CPUs, PSCI, GIC, the arch timer.
+ *
+ * Added for OmonullOS, October 2026. Every number is the stock tree's
+ * (G977NKSU6HWD3 dt.img, see docs/s10-5g/hardware.md); the layout follows
+ * mainline's exynos990.dtsi and exynos9810.dtsi. Clocks, pinctrl, UFS, USB
+ * and the PMU come at stage 4, one block per switch, as on the S9.
+ * CPUs, GIC, timer: tested on the phone (bx1, bx2). USB and the PMU syscon
+ * (stage 4, disabled here, build-boot.sh --usb): tested, bx8.
+ */
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	compatible = "samsung,exynos9820";
+	#address-cells = <2>;
+	#size-cells = <1>;
+
+	interrupt-parent = <&gic>;
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* The A55s and the A75s share one DynamIQ cluster (MPIDR
+		 * affinity 1 = 0); the M4s are a cluster of their own. */
+		cpu-map {
+			cluster0 {
+				core0 {
+					cpu = <&cpu0>;
+				};
+
+				core1 {
+					cpu = <&cpu1>;
+				};
+
+				core2 {
+					cpu = <&cpu2>;
+				};
+
+				core3 {
+					cpu = <&cpu3>;
+				};
+
+				core4 {
+					cpu = <&cpu4>;
+				};
+
+				core5 {
+					cpu = <&cpu5>;
+				};
+			};
+
+			cluster1 {
+				core0 {
+					cpu = <&cpu6>;
+				};
+
+				core1 {
+					cpu = <&cpu7>;
+				};
+			};
+		};
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x0>;
+			enable-method = "psci";
+		};
+
+		cpu1: cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x1>;
+			enable-method = "psci";
+		};
+
+		cpu2: cpu@2 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x2>;
+			enable-method = "psci";
+		};
+
+		cpu3: cpu@3 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x3>;
+			enable-method = "psci";
+		};
+
+		cpu4: cpu@4 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a75";
+			reg = <0x4>;
+			enable-method = "psci";
+		};
+
+		cpu5: cpu@5 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a75";
+			reg = <0x5>;
+			enable-method = "psci";
+		};
+
+		/* Mongoose M4; the binding lists M2, M3 and M5 only so far */
+		cpu6: cpu@100 {
+			device_type = "cpu";
+			compatible = "samsung,mongoose-m4";
+			reg = <0x100>;
+			enable-method = "psci";
+		};
+
+		cpu7: cpu@101 {
+			device_type = "cpu";
+			compatible = "samsung,mongoose-m4";
+			reg = <0x101>;
+			enable-method = "psci";
+		};
+	};
+
+	/* stock: "arm,psci", smc, the PSCI 0.2 function IDs */
+	/* the Samsung pinctrl driver picks its bank table by this id */
+	aliases {
+		pinctrl0 = &pinctrl_alive;
+	};
+
+	psci {
+		compatible = "arm,psci-0.2";
+		method = "smc";
+	};
+
+	oscclk: clock-osc {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+		clock-output-names = "oscclk";
+	};
+
+	/* stands in for DIV_CLK_USI_CMGP3, see hsi2c_cmgp3 */
+	usi_cmgp3_ipclk: clock-usi-cmgp3 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <400000000>;
+		clock-output-names = "usi_cmgp3_ipclk";
+	};
+
+	/*
+	 * Stands in for DIV_CLK_PERIC0_USI03_USI, see hsi2c_10. Read on the
+	 * phone (bx22, 2026-10-17): PLL_SHARED2 0xa1900d10 = 26 MHz x 400 / 13
+	 * = 800 MHz, SHARED2_DIV2 /2, CLKCMU_PERIC0_IP (MUX 1) /2, USI03_USI
+	 * user mux on CMU, DIV /1: 200 MHz, the stock default-clk.
+	 */
+	/*
+	 * Stands in for the G3D clock: S-Boot leaves PLL_G3D (0x1a240140 =
+	 * 0x80600412: 26 MHz x 96 / 4 / 4) at 156 MHz, the APM's DVFS boot
+	 * level for g3d, with the G3D power domain on (PMU 0x15862104 = 1). Read
+	 * on bx26, 2026-10-17. Rate changes go through the APM (zacpm dvfs), not
+	 * through this clock.
+	 */
+	g3d_clk: clock-g3d {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <156000000>;
+		clock-output-names = "g3d";
+	};
+
+	usi_peric0_usi03_ipclk: clock-usi-peric0-usi03 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+		clock-output-names = "usi_peric0_usi03_ipclk";
+	};
+
+	/*
+	 * Stand in for the UFS host's two CMU_FSYS1 gates (stock clocks 0x135
+	 * and 0x138, GATE_UFS_EMBD and UFS_EMBD), both fed from
+	 * CLKCMU_FSYS1_UFS_EMBD. Read on the phone (bx20, 2026-10-17): S-Boot
+	 * leaves it on PLL_SHARED4 / 2 / 2 (MUX 3, DIVRATIO 1; SHARED4_DIV2
+	 * DIVRATIO 1; PLL_CON0 0xa0cd0810: 26 MHz x 205 / 8 = 666.25 MHz), so
+	 * 166.5625 MHz, and its 1 us tick in the host reads 166. Samsung's
+	 * clock table has 177.667 MHz (PLL_SHARED0 / 4 / 3), which Android
+	 * sets later; the driver refuses a rate that disagrees with the tick.
+	 */
+	ufs_embd_clk: clock-ufs-embd {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <166562500>;
+		clock-output-names = "ufs_embd";
+	};
+
+	soc: soc@0 {
+		compatible = "simple-bus";
+		ranges = <0x0 0x0 0x0 0x20000000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		gic: interrupt-controller@10101000 {
+			compatible = "arm,gic-400";
+			reg = <0x10101000 0x1000>,
+			      <0x10102000 0x1000>,
+			      <0x10104000 0x2000>,
+			      <0x10106000 0x2000>;
+			#interrupt-cells = <3>;
+			interrupt-controller;
+			interrupts = <GIC_PPI 9 (GIC_CPU_MASK_SIMPLE(8) |
+						 IRQ_TYPE_LEVEL_HIGH)>;
+			#address-cells = <0>;
+			#size-cells = <1>;
+		};
+
+		/*
+		 * USB: Samsung's USBCON at 0x10b00000 has the register layout of
+		 * mainline's Exynos 850/990 driver bit for bit (stock
+		 * phy-exynos-usb3p1-reg.h) and the same PMU USB 2.0 control
+		 * (0x72c). High speed only for now; the USB 3.1/DP combo PHY at
+		 * 0x10ae0000 is left alone. FSYS0A has no clock driver yet: its
+		 * gates are Q-channel ones the hardware opens on demand, and the
+		 * PHY driver forces QACTIVE, so the clocks below stand in with
+		 * the 26 MHz crystal the PHY really uses as its reference.
+		 */
+		usbdrd_phy: phy@10b00000 {
+			compatible = "samsung,exynos9820-usbdrd-phy",
+				     "samsung,exynos990-usbdrd-phy";
+			reg = <0x10b00000 0x200>;
+			clocks = <&oscclk>, <&oscclk>;
+			clock-names = "phy", "ref";
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			#phy-cells = <1>;
+			status = "disabled";
+		};
+
+		usbdrd: usb@10c00000 {
+			compatible = "samsung,exynos9820-dwusb3",
+				     "samsung,exynos850-dwusb3";
+			ranges = <0x0 0x10c00000 0x10000>;
+			clocks = <&oscclk>, <&oscclk>;
+			clock-names = "bus_early", "ref";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			status = "disabled";
+
+			usbdrd_dwc3: usb@0 {
+				compatible = "snps,dwc3";
+				reg = <0x0 0x10000>;
+				interrupts = <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>;
+				phys = <&usbdrd_phy 0>;
+				phy-names = "usb2-phy";
+			};
+		};
+
+		/* SYSREG_FSYS1: the UFS host's IO coherency bits at 0x700 */
+		sysreg_fsys1: syscon@13c10000 {
+			compatible = "samsung,exynos9820-fsys1-sysreg", "syscon";
+			reg = <0x13c10000 0x1200>;
+		};
+
+		/*
+		 * UFS 2.1, two lanes, HS-G3 (stock ufs@0x13D60000). The host
+		 * sits in BLK_FSYS1, which has no power domain of its own (none
+		 * in Samsung's flexpmu tables) and no CMU driver here, so it is
+		 * reached only once kernel/beyondx/zufs.sh has read its gates
+		 * open; the driver is a module (kernel/beyondx/ufs). The stock
+		 * vcc-supply is a GPIO switch with no pinctrl driver yet: the
+		 * rail stays as S-Boot left it. The protector (0x13d70000) is
+		 * only reached through SMC calls and not mapped.
+		 */
+		ufs: ufs@13d60000 {
+			compatible = "samsung,exynos9820-ufs";
+			reg = <0x13d60000 0x200>,	/* standard HCI */
+			      <0x13d61100 0x200>,	/* vendor specific HCI */
+			      <0x13d50000 0x8000>,	/* UNIPRO */
+			      <0x13d64000 0x800>;	/* PHY (PMA) */
+			reg-names = "hci", "vs_hci", "unipro", "pma";
+			interrupts = <GIC_SPI 249 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ufs_embd_clk>, <&ufs_embd_clk>;
+			clock-names = "GATE_UFS_EMBD", "UFS_EMBD";
+			/* one "present, not scaled" pair per clock, or ufshcd
+			 * builds no clock list at all (see the S9 tree) */
+			freq-table-hz = <0 0>, <0 0>;
+			/* UFS_PHY_CONTROL (Samsung EXYNOS_PMU_UFS_PHY_OFFSET):
+			 * bit 0 bypasses the PHY's isolation */
+			samsung,pmu-syscon = <&pmu_system_controller 0x724>;
+			/* stock ufs-io-coherency: 0x13c10700, mask = bits */
+			samsung,sysreg = <&sysreg_fsys1 0x700 0xc00000 0xc00000>;
+			hw-rev = <6>;
+			samsung,evt-ver = /bits/ 8 <1>;
+			samsung,brd-for-cal = /bits/ 8 <1>;
+			samsung,pmd-attr-lane = /bits/ 8 <2>;
+			samsung,pmd-attr-gear = /bits/ 8 <3>;
+			dma-coherent;
+			status = "disabled";
+		};
+
+		/* plain syscon: mainline's exynos-pmu knows no 9820 */
+		pmu_system_controller: system-controller@15860000 {
+			compatible = "samsung,exynos9820-pmu", "syscon";
+			reg = <0x15860000 0x10000>;
+		};
+
+		/*
+		 * USI_CMGP3 as I2C: the bus to the MAX77705 (charger, fuel
+		 * gauge, USB-C/MUIC). The always-on CMGP block, set up by
+		 * S-Boot, which charges through it: USI mode (SYSREG_CMGP
+		 * 0x15c22030), pins gpm12-0/gpm13-0 and clocks are left as S-Boot
+		 * set them, there is no CMGP clock or pinctrl driver yet. The
+		 * ipclk is DIV_CLK_USI_CMGP3, of unknown rate at handover; 400 MHz
+		 * is above anything it can be (Samsung asks it for 200 MHz), so
+		 * the bus runs at 100 kHz or slower.
+		 */
+		hsi2c_cmgp3: i2c@15d60000 {
+			compatible = "samsung,exynos9820-hsi2c",
+				     "samsung,exynosautov9-hsi2c";
+			reg = <0x15d60000 0x1000>;
+			interrupts = <GIC_SPI 82 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&usi_cmgp3_ipclk>;
+			clock-names = "hsi2c";
+			clock-frequency = <100000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
+		 * USI03 of PERIC0 as I2C (stock hsi2c_10): the bus to the
+		 * touchscreen. PERIC0 and its USI03 gates are on at handover;
+		 * the USI mode (SYSREG_PERIC0 0x1042101c), pins gpp1-4/gpp1-5
+		 * and USI_RESET are set by initramfs (pre-usb.sh), as for
+		 * hsi2c_cmgp3: no PERIC0 clock or pinctrl driver yet.
+		 */
+		hsi2c_10: i2c@104b0000 {
+			compatible = "samsung,exynos9820-hsi2c",
+				     "samsung,exynosautov9-hsi2c";
+			reg = <0x104b0000 0x1000>;
+			interrupts = <GIC_SPI 388 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&usi_peric0_usi03_ipclk>;
+			clock-names = "hsi2c";
+			clock-frequency = <400000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
+		 * Mali-G76 MP12 (GPU_ID 0x72110000, SHADER_PRESENT 0x00770077,
+		 * read on bx26). Stock mali@18500000: JOB 0x120, MMU 0x11f, GPU
+		 * 0x121. No supplies or power domain here: S-Boot leaves both on.
+		 * Enabled by --gpu (exynos9820-beyondx-gpu.dtsi).
+		 */
+		gpu: gpu@18500000 {
+			compatible = "samsung,exynos9820-mali", "arm,mali-bifrost";
+			reg = <0x18500000 0x5000>;
+			interrupts = <GIC_SPI 288 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 287 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 289 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "job", "mmu", "gpu";
+			clocks = <&g3d_clk>;
+			status = "disabled";
+		};
+
+		/*
+		 * The ALIVE pin controller. Its banks are exynos990's ALIVE
+		 * table exactly (Samsung's exynos9820_pin_banks0 adds etc0 at
+		 * 0xc0, which no driver here uses), so mainline's exynos990
+		 * data serves it; each gpa pin has its own GIC SPI, 5..38 in
+		 * the stock tree. Read on bx23: every wakeup EINT masked
+		 * (0x900.. = 0xff), none pending. Enabled by --touch (the
+		 * touchscreen's IRQ is gpa1-0, SPI 13).
+		 */
+		pinctrl_alive: pinctrl@15850000 {
+			compatible = "samsung,exynos990-pinctrl";
+			reg = <0x15850000 0x1000>;
+			status = "disabled";
+
+			wakeup-interrupt-controller {
+				compatible = "samsung,exynos990-wakeup-eint",
+					     "samsung,exynos850-wakeup-eint",
+					     "samsung,exynos7-wakeup-eint";
+			};
+
+			gpa0: gpa0-gpio-bank {
+				gpio-controller;
+				#gpio-cells = <2>;
+
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				interrupt-parent = <&gic>;
+				interrupts = <GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 8 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 9 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 10 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			gpa1: gpa1-gpio-bank {
+				gpio-controller;
+				#gpio-cells = <2>;
+
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				interrupt-parent = <&gic>;
+				interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 14 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 15 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 17 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 18 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 19 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			gpa2: gpa2-gpio-bank {
+				gpio-controller;
+				#gpio-cells = <2>;
+
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				interrupt-parent = <&gic>;
+				interrupts = <GIC_SPI 21 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 22 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 23 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 24 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 25 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 26 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			gpa3: gpa3-gpio-bank {
+				gpio-controller;
+				#gpio-cells = <2>;
+
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				interrupt-parent = <&gic>;
+				interrupts = <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 33 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 35 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			gpa4: gpa4-gpio-bank {
+				gpio-controller;
+				#gpio-cells = <2>;
+
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				interrupt-parent = <&gic>;
+				interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>,
+						     <GIC_SPI 38 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			gpq0: gpq0-gpio-bank {
+				gpio-controller;
+				#gpio-cells = <2>;
+			};
+		};
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>;
+		/* S-Boot does not set CNTFRQ_EL0 (stock: clock-frequency = 26 MHz) */
+		clock-frequency = <26000000>;
+	};
+};

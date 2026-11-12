@@ -1,0 +1,22 @@
+# Galaxy S10 5G: the guards initramfs runs (watchdog pet, charger rate,
+# thermal guard), started again in the root system. Added for OmonullOS,
+# October 2026.
+[Unit]
+Description=zboot (Galaxy S10 5G): watchdog pet, charger rate, thermal guard
+DefaultDependencies=no
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+ExecStart=/usr/local/sbin/zboot-guards
+# if this stops, so does the watchdog reload: the phone resets into TWRP
+Restart=always
+RestartSec=1
+# On the way down the pet stops here, and the watchdog (30 s, WTDAT 23805)
+# used to reset the phone into TWRP before systemd-shutdown reached
+# zboot-poweroff (2026-10-18). One last reload to the counter's maximum,
+# 0xffff, gives the rest of the shutdown ~82 s; a hang still ends in TWRP.
+ExecStopPost=/usr/local/bin/devmem 0x10050008 32 0xffff
+
+[Install]
+WantedBy=sysinit.target

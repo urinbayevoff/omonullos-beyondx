@@ -1,0 +1,12 @@
+# Added for OmonullOS, November 2026: ztOS's wallpapers and ringtones,
+# downloaded on request (Settings > theme), see ztos-media-fetch
+[Unit]
+Description=omonullOS: download ztOS's wallpapers and ringtones
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ztos-media-fetch
+# 184 MB: about 25 min on a phone hotspot (140 KB/s, 11-12)
+TimeoutStartSec=2h

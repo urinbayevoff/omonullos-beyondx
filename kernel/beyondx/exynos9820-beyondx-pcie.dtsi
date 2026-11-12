@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Galaxy S10 5G: the Wi-Fi PCIe root complex (channel 0, BLK_FSYS1, Gen2
+ * PHY run at Gen1 like the stock tree) for kernel/beyondx/pcie
+ * (pcie-exynos9820, a module loaded by hand), included by
+ * scripts/build-boot.sh --device beyondx --wlan.
+ *
+ * Added for OmonullOS, October 2026. From the stock tree pcie0@13ED0000
+ * (reg-names elbi phy sysreg dbi pcs config ia; the sysreg and IA windows
+ * are reached through syscons / not used) and the S9+ port's pcie node.
+ * Pins (set by the driver, see its header): gpf2-0 CLKREQ#, gpf2-2 PERST#,
+ * gpg0-5 WL_REG_ON. Not dma-coherent: the S9+ port found the dongle reading
+ * stale ring items with the property set, on the same IP.
+ */
+
+&soc {
+	pcie_wlan: pcie@13ed0000 {
+		compatible = "samsung,exynos9820-pcie";
+		reg = <0x13ed0000 0x1000>,	/* elbi */
+		      <0x13ef0000 0x1000>,	/* phy (PMA) */
+		      <0x13ee0000 0x1fc>,	/* pcs */
+		      <0x13f00000 0x1000>,	/* dbi */
+		      <0x14ffe000 0x2000>;	/* config window */
+		reg-names = "elbi", "phy", "pcs", "dbi", "config";
+		interrupts = <GIC_SPI 253 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "intr";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		device_type = "pci";
+		/* stock tree: 16 MB MEM window, identity mapped, no I/O window */
+		ranges = <0x82000000 0x0 0x14000000 0x14000000 0x0 0xff0000>;
+		bus-range = <0x00 0xff>;
+		#interrupt-cells = <1>;
+		interrupt-map-mask = <0 0 0 0x7>;
+		interrupt-map = <0 0 0 1 &pcie_wlan_intc 0>,
+				<0 0 0 2 &pcie_wlan_intc 1>,
+				<0 0 0 3 &pcie_wlan_intc 2>,
+				<0 0 0 4 &pcie_wlan_intc 3>;
+		num-lanes = <1>;
+		max-link-speed = <1>;		/* stock: Gen1 */
+		samsung,pmu-syscon = <&pmu_system_controller>;
+		samsung,fsys-sysreg = <&sysreg_fsys1>;
+
+		pcie_wlan_intc: legacy-interrupt-controller {
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <1>;
+		};
+	};
+};
