@@ -75,6 +75,7 @@ O_TEXT = {
     "badsig": "Topilgan yangilaniş imzosi notoğri, örnatilmaydi.",
     "refused": "Topilgan yangilaniş bu telefon uçun emas, örnatilmaydi.",
     "needs-updater": "Bu yangilaniş uçun avval yangilaş dasturining özini yangilaş kerak.",
+    "kernel": "Topilgan yangilaniş boşqa yadro uçun, örnatilmaydi (avval BOOT yangilanişi kerak).",
 }
 
 
@@ -206,6 +207,8 @@ class Home(ztos.Page):
                          + ", ".join("/" + k for k in s["kept"]))
         elif st == "failed":
             text = "Bölmadi: " + s.get("msg", "") + "\nBatafsil: /var/log/omonullos-update.log"
+        elif st == "rolled-back" and s.get("auto"):
+            text = ("Yangilanişdan keyin telefon yaxşi yuklanmadi, şuning uçun oldingi versiyaga özi qaytdi.")
         elif st == "rolled-back":
             text = "Oldingi versiyaga qaytildi." + (" Telefonni qayta yoqing." if need_reboot else "")
         elif st in O_TEXT:

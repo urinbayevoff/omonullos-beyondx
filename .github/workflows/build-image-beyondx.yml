@@ -120,6 +120,7 @@ jobs:
           # FLAGS is a word list on purpose
           bash scripts/build-boot.sh "$NAME" --device beyondx $FLAGS --cmdline "$CMDLINE"
           { echo "commit $GITHUB_SHA"; echo "flags --device beyondx $FLAGS"; echo "cmdline $CMDLINE"; } > "out/$NAME.build-info"
+          cp build/linux-7.1/out-beyondx/.config out/kernel.config
 
       - name: Kernel-side files
         env:
@@ -153,6 +154,7 @@ jobs:
           path: |
             out/extra.tar
             out/extra.tar.sha256-list
+            out/kernel.config
           retention-days: 14
 
   rootfs:
@@ -201,6 +203,14 @@ jobs:
             echo "OTA_VERSION=$v"
             echo "OTA_TAG=$GITHUB_REF_NAME"
             echo "OTA_NOTES=$PWD/$notes"
+            [ ! -f out/kernel.config ] || echo "OTA_KCONFIG=$PWD/out/kernel.config"
+            # image/beyondx/ota/VERSION.env: COMPAT=1 (a bridge release for
+            # updater 1), KERNEL_FILES="globs" (the modules that go in)
+            if [ -f "image/beyondx/ota/$v.env" ]; then
+              . "image/beyondx/ota/$v.env"
+              echo "OTA_COMPAT=${COMPAT:-0}"
+              echo "OTA_KERNEL_FILES=${KERNEL_FILES:-}"
+            fi
           } >> "$GITHUB_ENV"
           # the delta's base: the newest published release whose manifest the
           # owner signed (checked here with the keys in the tree)
@@ -232,7 +242,7 @@ jobs:
           else
             args+=(--allow-missing)
           fi
-          sudo --preserve-env=OTA_VERSION,OTA_TAG,OTA_NOTES,OTA_BASE \
+          sudo --preserve-env=OTA_VERSION,OTA_TAG,OTA_NOTES,OTA_BASE,OTA_COMPAT,OTA_KCONFIG,OTA_KERNEL_FILES \
             bash scripts/build-beyondx-image.sh "${args[@]}"
           df -h /
 

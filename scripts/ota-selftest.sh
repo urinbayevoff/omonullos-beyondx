@@ -131,21 +131,21 @@ cp rel/beyondx-v0.2/update-0.2.tar.zst rel/beyondx-v0.3/
 openssl pkeyutl -sign -inkey key.pem -rawin -in rel/beyondx-v0.3/manifest.json -out rel/beyondx-v0.3/manifest.json.sig
 python3 "$UPD" check --quiet; [ "$(st)" = available ] || fail "expected v0.2 offered past the refused v0.3, got $(st)"
 grep -q '"version": "0.2"' phone/var/lib/omonullos-update/available.json || fail "not v0.2"
-grep -q "manifest refused: not allowed: usr/lib/modules" log || fail "v0.3 not refused for the module path"
-ok "a signed manifest with a path outside user space is refused"
+grep -q "manifest refused: modules only below usr/lib/modules/RELEASE/extra" log || fail "v0.3 not refused for the module path"
+ok "a signed manifest with a module outside the module places is refused"
 rm -rf rel/beyondx-v0.3
 
 # a release that needs a newer updater (stage 2: BOOT, modules) is only reported
 python3 - "$W/rel/beyondx-v0.2/manifest.json" "$W/rel/beyondx-v0.4/manifest.json" <<'EOF'
 import json, os, sys
 m = json.load(open(sys.argv[1]))
-m["version"] = "0.4"; m["min_updater"] = 2; m["boot"] = {"name": "boot.img", "sha256": "0" * 64}
+m["version"] = "0.4"; m["min_updater"] = 3; m["boot"] = {"name": "boot.img", "sha256": "0" * 64}
 os.makedirs(os.path.dirname(sys.argv[2]), exist_ok=True)
 open(sys.argv[2], "w").write(json.dumps(m))
 EOF
 openssl pkeyutl -sign -inkey key.pem -rawin -in rel/beyondx-v0.4/manifest.json -out rel/beyondx-v0.4/manifest.json.sig
 python3 "$UPD" check --quiet; [ "$(st)" = needs-updater ] || fail "expected needs-updater, got $(st)"
-python3 "$UPD" apply && fail "a min_updater 2 release was applied"
+python3 "$UPD" apply && fail "a min_updater 3 release was applied"
 [ "$(phone/usr/local/bin/ztmetro)" = "ztmetro 0.1" ] || fail "needs-updater changed files"
 ok "a release for a newer updater (BOOT) is refused, nothing changed"
 rm -rf rel/beyondx-v0.4
@@ -185,5 +185,77 @@ grep -q "symlink on the way" log || fail "no symlink refusal in the log"
 [ "$(phone/usr/local/bin/ztmetro)" = "ztmetro 0.1" ] || fail "symlink refusal came after files were written"
 ok "a symlinked directory on the way is refused, nothing written outside"
 rm phone/usr/local/share/ztos; mv phone/usr/local/share/ztos.real phone/usr/local/share/ztos
+
+# ---- updater 2: our kernel modules, only for the running kernel
+printf 'license=GPL\0vermagic=7.1.0-zboot SMP preempt mod_unload aarch64\0' > mi
+mkko() { mkdir -p "$(dirname "$1")"; objcopy -I binary -O elf64-littleaarch64 --rename-section .data=.modinfo mi "$1"; }
+echo "CONFIG_TEST=y" > kconf
+export OMONULLOS_UPDATE_UNAME_R=7.1.0-zboot OMONULLOS_UPDATE_KCONFIG="$W/kconf"
+signrel() { # VER (out$VER -> rel/beyondx-v$VER, signed)
+	mkdir -p "rel/beyondx-v$1"
+	cp "out$1/manifest.json" "out$1"/update-*.tar.zst "rel/beyondx-v$1/"
+	openssl pkeyutl -sign -inkey key.pem -rawin -in "rel/beyondx-v$1/manifest.json" -out "rel/beyondx-v$1/manifest.json.sig"
+}
+python3 "$UPD" check --quiet && python3 "$UPD" apply || fail "to 0.2.1"
+rm -rf r4; cp -a r3 r4
+mkko r4/usr/local/lib/zboot/tools/zsleep.ko
+mkko r4/usr/lib/modules/7.1.0-zboot/extra/snd/snd.ko
+printf '#!/bin/sh\necho load\n' > r4/usr/local/lib/zboot/tools/zaudio-load.sh
+chmod 755 r4/usr/local/lib/zboot/tools/zaudio-load.sh
+
+python3 "$MK" --root r4 --version 0.2.5 --tag beyondx-v0.2.5 --notes notes --out outb --overlay ov --compat 1 >/dev/null
+grep -q 'zboot\|modules' outb/manifest.json && fail "a bridge release took zboot or modules"
+grep -q '"min_updater": 1' outb/manifest.json || fail "a bridge release is not min_updater 1"
+python3 "$MK" --root r4 --version 0.2.5 --tag beyondx-v0.2.5 --notes notes --out outx --overlay ov 2>/dev/null &&
+	fail "modules packed without --kernel-config"
+ok "a bridge release (--compat 1) leaves modules and zboot out; modules need --kernel-config"
+
+python3 "$MK" --root r4 --version 0.3.0 --tag beyondx-v0.3.0 --notes notes --out out0.3.0 --overlay ov \
+	--kernel-config kconf --base out0.2.1/manifest.json >/dev/null
+grep -q '"min_updater": 2' out0.3.0/manifest.json || fail "a module release is not min_updater 2"
+grep -q '"release": "7.1.0-zboot"' out0.3.0/manifest.json || fail "no kernel in the manifest"
+signrel 0.3.0
+python3 "$UPD" check --quiet; [ "$(st)" = available ] || fail "module release: expected available, got $(st)"
+python3 "$UPD" apply || fail "module apply: $(cat run/status.json)"
+[ -f phone/usr/local/lib/zboot/tools/zsleep.ko ] || fail "zsleep.ko not installed"
+[ -f phone/usr/lib/modules/7.1.0-zboot/extra/snd/snd.ko ] || fail "snd.ko not installed"
+[ -f phone/var/lib/omonullos-update/trial.json ] || fail "no trial after a module update"
+ok "a module release for the running kernel installs, the next boots are a trial"
+
+python3 "$UPD" boot; python3 "$UPD" boot
+[ -f phone/usr/local/lib/zboot/tools/zsleep.ko ] || fail "rolled back too early"
+python3 "$UPD" boot
+[ ! -e phone/usr/local/lib/zboot/tools/zsleep.ko ] || fail "the third boot without boot-ok did not roll back"
+[ ! -e phone/var/lib/omonullos-update/trial.json ] || fail "trial left after the rollback"
+grep -q '"version": "0.2.1"' phone/var/lib/omonullos-update/installed.json || fail "not back on 0.2.1"
+ok "two boots that never stayed up: the third puts the old files back"
+
+python3 "$UPD" check --quiet && python3 "$UPD" apply || fail "module apply again"
+python3 "$UPD" boot; python3 "$UPD" boot-ok
+[ ! -e phone/var/lib/omonullos-update/trial.json ] || fail "boot-ok left the trial"
+python3 "$UPD" boot; python3 "$UPD" boot; python3 "$UPD" boot
+[ -f phone/usr/local/lib/zboot/tools/zsleep.ko ] || fail "rolled back after boot-ok"
+ok "a boot that stayed up (boot-ok) ends the trial"
+
+python3 "$UPD" rollback >/dev/null 2>&1
+echo "CONFIG_TEST=m" > kconf2
+OMONULLOS_UPDATE_KCONFIG="$W/kconf2" python3 "$UPD" check --quiet
+[ "$(st)" = kernel ] || fail "another kernel config: expected kernel, got $(st)"
+OMONULLOS_UPDATE_UNAME_R=7.2.0 python3 "$UPD" check --quiet
+[ "$(st)" = kernel ] || fail "another kernel release: expected kernel, got $(st)"
+grep -q "modules not for this kernel" log || fail "no kernel refusal in the log"
+ok "modules for another kernel (config or release) are never offered"
+
+python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+m["kernel"]["vermagic"] = "7.1.0-zboot SMP preempt aarch64"
+open(sys.argv[1], "w").write(json.dumps(m))
+' "$W/rel/beyondx-v0.3.0/manifest.json"
+openssl pkeyutl -sign -inkey key.pem -rawin -in rel/beyondx-v0.3.0/manifest.json -out rel/beyondx-v0.3.0/manifest.json.sig
+python3 "$UPD" check --quiet && python3 "$UPD" apply 2>/dev/null && fail "a module with another vermagic went in"
+[ ! -e phone/usr/local/lib/zboot/tools/zsleep.ko ] || fail "vermagic refusal left a module"
+grep -q "vermagic of" log || fail "no vermagic refusal in the log"
+ok "a module whose vermagic is not the manifest's is refused"
 
 echo "all $pass passed ($W)"

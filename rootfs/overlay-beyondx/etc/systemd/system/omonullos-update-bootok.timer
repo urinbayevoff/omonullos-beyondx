@@ -1,0 +1,8 @@
+[Unit]
+Description=omonullOS: mark the update trial passed 3 minutes after boot
+
+[Timer]
+OnBootSec=3min
+
+[Install]
+WantedBy=timers.target

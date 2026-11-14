@@ -279,7 +279,7 @@ install -Dm644 "$SRC/os/wallpapers/commons-fetch.py" "$SRC/os/wallpapers/commons
 # --- system settings ---
 say "user, locale, services"
 echo beyondx > "$R/etc/hostname"
-ln -sf /usr/share/zoneinfo/Asia/Tashkent "$R/etc/localtime"
+ln -sf ../usr/share/zoneinfo/Asia/Tashkent "$R/etc/localtime"
 sed -i -e 's/^#\(en_US.UTF-8 UTF-8\)/\1/' -e 's/^#\(uz_UZ UTF-8\)/\1/' "$R/etc/locale.gen"
 ch locale-gen >/dev/null
 # the tarball's user alarm (password alarm) is the phone's; root is locked
@@ -321,10 +321,10 @@ want multi-user.target zboot-firstboot zboot-usb-gadget zbattlog zcpu zgpu zlowb
 want sysinit.target zvendor-firmware zboot-guards zclock zlastlog
 want graphical.target zrn-cpuidle
 want poweroff.target zchgoff
-# omonullOS updates (omonullos-update): a look once a day, and the keys that
-# may sign them (public halves only; the private key is with the owner)
-mkdir -p "$S/timers.target.wants"
-ln -sf /etc/systemd/system/omonullos-update-check.timer "$S/timers.target.wants/omonullos-update-check.timer"
+# omonullOS updates (omonullos-update): the keys that may sign them (public
+# halves only; the private key is with the owner). The units' enable links
+# (daily check, boot trial) come with the overlay, relative, so that updates
+# can carry them too.
 if ls "$SRC"/image/beyondx/ota-keys/*.pem >/dev/null 2>&1; then
 	install -Dm644 -t "$R/usr/local/share/omonullos/ota-keys" "$SRC"/image/beyondx/ota-keys/*.pem
 else
@@ -356,15 +356,19 @@ rm -rf "$R/var/log/pacman.log" "$R"/root/.bash_history "$R"/etc/ssh/ssh_host_*
 	[ -z "$missing" ] || echo "MISSING:$missing"
 } > "$R/etc/omonullos-build"
 # the update made from this very root (OTA_VERSION/OTA_TAG/OTA_NOTES from the
-# CI on a tag; OTA_BASE = the previous release's manifest, for a delta): the
-# image then knows its version and which /etc files are still ours
+# CI on a tag; OTA_BASE = the previous release's manifest, for a delta;
+# OTA_COMPAT=1 a bridge release for updater 1; OTA_KCONFIG the kernel's
+# .config and OTA_KERNEL_FILES the module globs that go in): the image then
+# knows its version and which /etc files are still ours
 if [ -n "${OTA_VERSION:-}" ]; then
 	say "update package $OTA_VERSION"
 	rm -rf "$(dirname "$OUT")/ota"
 	python3 "$SRC/scripts/ota-make-package.py" --root "$R" --version "$OTA_VERSION" \
 		--tag "${OTA_TAG:-beyondx-v$OTA_VERSION}" --notes "${OTA_NOTES:?OTA_NOTES}" \
 		--commit "$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)" \
-		--out "$(dirname "$OUT")/ota" ${OTA_BASE:+--base "$OTA_BASE"}
+		--out "$(dirname "$OUT")/ota" ${OTA_BASE:+--base "$OTA_BASE"} \
+		--compat "${OTA_COMPAT:-0}" ${OTA_KCONFIG:+--kernel-config "$OTA_KCONFIG"} \
+		${OTA_KERNEL_FILES:+--kernel-files "$OTA_KERNEL_FILES"}
 	install -Dm644 "$(dirname "$OUT")/ota/installed.json" "$R/var/lib/omonullos-update/installed.json"
 fi
 cleanup

@@ -15,7 +15,9 @@ RESLEEP=${RESLEEP:-20}
 TICK=5
 WIFI_PCI=0000:01:00.0
 GADGET=/sys/kernel/config/usb_gadget/zboot
-KO=${KO:-/root/tools/zrn-system-sleep-bx.ko}
+# the image keeps it with the other boot modules (updates put it there too)
+KO=${KO:-/usr/local/lib/zboot/tools/zrn-system-sleep-bx.ko}
+[ -e "$KO" ] || KO=/root/tools/zrn-system-sleep-bx.ko
 P=/sys/module/zrn_system_sleep_bx/parameters
 IP=/sys/module/zrn_cpuidle_bx/parameters
 AMP=/sys/module/snd_zrn_abox_bx/parameters

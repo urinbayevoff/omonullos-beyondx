@@ -1,0 +1,6 @@
+[Unit]
+Description=omonullOS: the phone stayed up, the update trial passed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/omonullos-update boot-ok

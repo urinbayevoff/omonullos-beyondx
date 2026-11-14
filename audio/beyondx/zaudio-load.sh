@@ -4,14 +4,20 @@
 # 7.1.0-zboot, then the ABOX/CS35L40 driver (audio/beyondx/snd-zrn-abox-bx.c).
 # Arguments go to the driver as module parameters.
 # Added for OmonullOS, November 2026 (the phone's /root/tools copy since October).
+# Options from /etc/modprobe.d, else from /var/lib/zaudio/spk.conf (zspk-calibrate).
 cd /lib/modules/7.1.0-zboot/extra/snd
 for m in soundcore snd snd-timer snd-pcm i2c-algo-bit; do insmod $m.ko 2>/dev/null; done
 sync
 # insmod reads no /etc/modprobe.d: take the driver's "options snd_zrn_abox_bx ..."
 # lines from there by hand (dsp_cal_r, the measured RDC); if they do not load,
 # the driver loads without them as before
-OPTS=$(sed -n 's/^[[:space:]]*options[[:space:]]\+snd[-_]zrn[-_]abox[-_]bx[[:space:]]\+//p' \
-	/etc/modprobe.d/snd-zrn-abox-bx.conf 2>/dev/null | tr '\n' ' ')
+opts_of() {
+	sed -n 's/^[[:space:]]*options[[:space:]]\+snd[-_]zrn[-_]abox[-_]bx[[:space:]]\+//p' "$1" 2>/dev/null |
+		tr '\n' ' '
+}
+OPTS=$(opts_of /etc/modprobe.d/snd-zrn-abox-bx.conf)
+# none there: this phone's measured speaker (zspk-calibrate), protection on
+[ -n "$OPTS" ] || OPTS=$(opts_of /var/lib/zaudio/spk.conf)
 # shellcheck disable=SC2086
 insmod /root/tools/snd-zrn-abox-bx.ko vss_cp=${ZAUDIO_VSS:-0} $OPTS "$@" ||
 	{ [ -n "$OPTS" ] && echo "zaudio-load: options '$OPTS' refused, loading without" >&2 &&

@@ -1,0 +1,4 @@
+• Yangilaş dasturining yangi versiyasi: endi drayver (modul) yangilanişlarini ham örnata oladi, faqat telefonning öz yadrosiga mos bölsa.
+• Himoya: modul yangilanişidan keyin telefon ikki marta yaxşi yuklanmasa, uçinçisida oldingi holatga özi qaytadi.
+• Yangilanişlar ilovasida yangi xabarlar.
+• Keyingi yangilaniş (0.2.2) avtomatik uyqu va karnay kalibrovkasini olib keladi.

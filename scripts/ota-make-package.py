@@ -62,7 +62,9 @@ def sha256(path):
     return h.hexdigest()
 
 
-def usable(upd, rel):
+def usable(upd, rel, compat):
+    if compat == 1 and not rel.startswith(upd.ALLOWED_V1):
+        return False
     try:
         upd.check_path(rel)
         return True
@@ -70,9 +72,9 @@ def usable(upd, rel):
         return False
 
 
-def collect(upd, root, overlays):
+def collect(upd, root, overlays, compat):
     rels = set()
-    for prefix in upd.ALLOWED:
+    for prefix in (upd.ALLOWED_V1 if compat == 1 else upd.ALLOWED):
         if prefix == "etc/":
             continue
         base = os.path.join(root, prefix)
@@ -83,19 +85,22 @@ def collect(upd, root, overlays):
     for ov in overlays:
         base = os.path.join(ov, "etc")
         for d, dirs, files in os.walk(base):
-            for name in files:
+            for name in files + [x for x in dirs if os.path.islink(os.path.join(d, x))]:
                 rel = os.path.relpath(os.path.join(d, name), ov)
                 if os.path.lexists(os.path.join(root, rel)):
                     rels.add(rel)
     out = []
     for rel in sorted(rels):
-        if rel.endswith(SKIP_SUFFIX) or not usable(upd, rel):
+        if rel.endswith(SKIP_SUFFIX) or not usable(upd, rel, compat):
             continue
         p = os.path.join(root, rel)
         if os.path.islink(p):
             target = os.readlink(p)
             if os.path.basename(target) == "busybox-zboot":
                 continue  # made by the kernel job, not a stage-1 file
+            if os.path.isabs(target):
+                # updaters extract with tarfile's data filter: no absolute links
+                sys.exit(f"{rel}: an absolute symlink ({target}); make it relative")
             out.append({"path": rel, "type": "link", "target": target})
         elif os.path.isfile(p):
             st = os.stat(p)
@@ -135,11 +140,22 @@ def main():
     ap.add_argument("--after", default="reboot", choices=["none", "restart-shell", "reboot"])
     ap.add_argument("--overlay", action="append", help="overlay dirs whose etc/ files are ours")
     ap.add_argument("--base", help="the previous release's manifest.json: also make a delta from it")
+    ap.add_argument("--compat", type=int, default=0,
+                    help="1: only what updater 1 may install (a bridge release: no modules, no zboot)")
+    ap.add_argument("--kernel-config", help="the kernel's .config (needed when modules are in)")
+    ap.add_argument("--kernel-files", default="",
+                    help="space-separated globs: only these module files go in (the rest of the root's "
+                         "modules stay as the phone has them)")
     a = ap.parse_args()
 
     upd = load_updater()
     overlays = a.overlay or [os.path.join(TREE, o) for o in OVERLAYS]
-    files = collect(upd, a.root, overlays)
+    files = collect(upd, a.root, overlays, a.compat)
+    if a.kernel_files:
+        import fnmatch
+        pats = a.kernel_files.split()
+        files = [e for e in files if not upd.kernel_side(e["path"])
+                 or any(fnmatch.fnmatch(e["path"], p) for p in pats)]
     if not files:
         sys.exit("no files found under " + a.root)
     os.makedirs(a.out, exist_ok=True)
@@ -165,6 +181,31 @@ def main():
               f"{delta['size'] >> 10} KB")
     with open(a.notes, encoding="utf-8") as f:
         notes = f.read().strip()
+    kernel, min_updater = None, 1
+    kfiles = [e for e in files if upd.kernel_side(e["path"])]
+    if kfiles or any(e["path"].startswith("usr/local/lib/zboot/") for e in files):
+        min_updater = 2
+    if kfiles:
+        if not a.kernel_config:
+            sys.exit(f"{len(kfiles)} module files in, but no --kernel-config")
+        with open(a.kernel_config, "rb") as f:
+            conf_digest = upd.config_digest(f.read())
+        rels = sorted({e["path"].split("/")[3] for e in kfiles if e["path"].startswith("usr/lib/modules/")})
+        if len(rels) > 1:
+            sys.exit(f"modules for several releases: {rels}")
+        magics = set()
+        for e in kfiles:
+            if e["path"].endswith(".ko"):
+                out = subprocess.run(["modinfo", "-F", "vermagic", os.path.join(a.root, e["path"])],
+                                     stdout=subprocess.PIPE, text=True).stdout.strip()
+                magics.add(out)
+        if len(magics) != 1 or "" in magics:
+            sys.exit(f"modules with different (or no) vermagic: {sorted(magics)}")
+        vermagic = magics.pop()
+        release = rels[0] if rels else vermagic.split()[0]
+        if not vermagic.startswith(release + " "):
+            sys.exit(f"vermagic {vermagic!r} is not for {release}")
+        kernel = {"release": release, "vermagic": vermagic, "config_digest": conf_digest}
     manifest = {
         "format": 1,
         "device": upd.DEVICE,
@@ -172,7 +213,7 @@ def main():
         "tag": a.tag,
         "commit": a.commit,
         "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "min_updater": 1,
+        "min_updater": min_updater,
         "after": a.after,
         "notes": notes,
         "package": {"name": name, "size": os.path.getsize(pkg), "sha256": sha256(pkg)},
@@ -181,6 +222,8 @@ def main():
     }
     if delta:
         manifest["delta"] = delta
+    if kernel:
+        manifest["kernel"] = kernel
     upd.check_manifest(manifest)
     data = json.dumps(manifest, ensure_ascii=False, indent=1).encode() + b"\n"
     with open(os.path.join(a.out, "manifest.json"), "wb") as f:

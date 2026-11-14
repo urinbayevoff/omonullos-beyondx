@@ -1,0 +1,17 @@
+# omonullOS: after an update that changed kernel modules, the next boots are
+# a trial; this counts them before any of our modules load, and on the third
+# boot without the phone staying up puts the old files back.
+[Unit]
+Description=omonullOS: update trial at boot
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target zlastlog.service zboot-guards.service zvendor-firmware.service zclock.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/omonullos-update boot
+TimeoutSec=180
+
+[Install]
+WantedBy=sysinit.target

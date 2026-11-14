@@ -10,6 +10,8 @@ the apps, the z* helpers, the scripts and the overlay files.
     omonullos-update apply             download, verify and install it
     omonullos-update rollback          put back what the last update replaced
     omonullos-update status            print the state (for people)
+    omonullos-update boot              (early at boot) the trial after a module update
+    omonullos-update boot-ok           (3 min after boot) the trial passed
 
 A release has three files: manifest.json (version, what is new, every file with
 its sha256), manifest.json.sig (ed25519 over the exact manifest bytes, made with
@@ -17,9 +19,16 @@ a key that lives only with the owner, never on GitHub) and the package (a
 tar.zst of the files). Nothing is used before the signature is good, and every
 file is checked against the manifest before it is installed.
 
-Stage 1 writes only below ALLOWED (user space). The kernel, modules, BOOT and
-firmware are never touched: a manifest that needs those says so with
-"min_updater" and this version refuses it ("update the updater first").
+It writes only below ALLOWED. User space (stage 1, updater 1): usr/local and
+the overlay's /etc. Kernel modules (updater 2): our out-of-tree modules in
+usr/local/lib/zboot and usr/lib/modules/RELEASE/extra, and only when the
+manifest's "kernel" (release, vermagic, config_digest of the kernel config) is
+the running kernel's (/proc/config.gz) and every .ko's vermagic matches: modules
+are never installed for another kernel. After a module update the next boots
+are a trial: if the phone does not stay up 3 minutes twice, the third boot
+puts the old files back before any of our modules load. BOOT and firmware
+are never touched; a manifest that needs a newer updater says so with
+"min_updater" and is refused ("update the updater first").
 
 State for the Updates app:
     /run/omonullos-update/status.json   {"state": ..., "k": .., "n": .., "msg": ..}
@@ -40,7 +49,7 @@ import tempfile
 import time
 import urllib.request
 
-UPDATER_VERSION = 1        # what this updater can install (manifest "min_updater")
+UPDATER_VERSION = 2        # what this updater can install (manifest "min_updater")
 DEVICE = "beyondx"
 
 ROOT = os.environ.get("OMONULLOS_UPDATE_ROOT", "/").rstrip("/") or "/"
@@ -51,8 +60,14 @@ LOG = os.environ.get("OMONULLOS_UPDATE_LOG", "/var/log/omonullos-update.log")
 KEYS = "/usr/local/share/omonullos/ota-keys"     # *.pem, any one may sign
 
 # where an update may write (relative to /), and what it never may
-ALLOWED = ("usr/local/bin/", "usr/local/sbin/", "usr/local/share/", "usr/local/lib/ztos-sdk/",
-           "usr/local/lib/omonullos/", "etc/")
+ALLOWED_V1 = ("usr/local/bin/", "usr/local/sbin/", "usr/local/share/", "usr/local/lib/ztos-sdk/",
+              "usr/local/lib/omonullos/", "etc/")
+ALLOWED = ALLOWED_V1 + ("usr/local/lib/zboot/", "usr/lib/modules/")
+MAX_TRIAL_BOOTS = 2
+# tests: the running kernel as these say (release; a plain config file)
+UNAME_R = os.environ.get("OMONULLOS_UPDATE_UNAME_R")
+KCONFIG = os.environ.get("OMONULLOS_UPDATE_KCONFIG")
+NO_MODINFO = os.environ.get("OMONULLOS_UPDATE_NO_MODINFO") == "1"
 DENIED = ("usr/local/bin/busybox-zboot", "usr/local/share/omonullos/ota-keys/",
           "etc/shadow", "etc/gshadow", "etc/passwd", "etc/group", "etc/sudoers",
           "etc/polkit-1/", "etc/fstab", "etc/ssh/ssh_host_", "etc/machine-id",
@@ -169,7 +184,70 @@ def check_path(rel):
     for d in DENIED:
         if rel == d.rstrip("/") or rel.startswith(d):
             raise ValueError(f"denied: {rel}")
+    if rel.startswith("usr/lib/modules/") and (len(parts) < 6 or parts[4] != "extra"):
+        raise ValueError(f"modules only below usr/lib/modules/RELEASE/extra: {rel}")
+    if rel.endswith(".ko") and not rel.startswith(("usr/local/lib/zboot/", "usr/lib/modules/")):
+        raise ValueError(f"a module outside the module places: {rel}")
     return rel
+
+
+def kernel_side(rel):
+    return rel.endswith(".ko") or rel.startswith("usr/lib/modules/")
+
+
+def kernel_files(m):
+    return [e for e in m["files"] if kernel_side(e["path"])]
+
+
+CONFIG_SKIP = ("CONFIG_INITRAMFS_SOURCE=", "CONFIG_RUSTC_", "CONFIG_PAHOLE_VERSION=", "CONFIG_BUILD_SALT=",
+               "CONFIG_LOCALVERSION=", "CONFIG_OPENSSL_SUPPORTS_")
+
+
+def config_digest(conf):
+    """sha256 of a kernel config's set options, sorted, minus what only says
+    where or with which host tools it was built (the CI's paths, rustc,
+    pahole, openssl): two builds of the same kernel with the same options
+    give the same digest."""
+    lines = sorted(line for line in conf.decode(errors="replace").splitlines()
+                   if line.startswith("CONFIG_") and "=" in line and not line.startswith(CONFIG_SKIP))
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
+def running_kernel():
+    """(release, config_digest of its config)"""
+    import gzip
+    release = UNAME_R or os.uname().release
+    if KCONFIG:
+        with open(KCONFIG, "rb") as f:
+            conf = f.read()
+    else:
+        with gzip.open("/proc/config.gz") as f:
+            conf = f.read()
+    return release, config_digest(conf)
+
+
+def kernel_mismatch(m):
+    """None if the manifest's modules are for the running kernel, else why not."""
+    k = m.get("kernel") or {}
+    try:
+        release, conf = running_kernel()
+    except OSError as e:
+        return f"cannot read the running kernel's config: {e}"
+    if k.get("release") != release:
+        return f"for kernel {k.get('release')}, this one is {release}"
+    if k.get("config_digest") != conf:
+        return "for a kernel built with another config"
+    return None
+
+
+def stage_filter(member, path):
+    """tarfile's data filter, but a symlink may point anywhere (v0.2's package
+    has /etc/localtime -> /usr/share/zoneinfo/...): links are only compared
+    with the manifest and put in place, never followed; a file below a link
+    that leaves the stage is still refused (data filter on files)."""
+    if member.issym():
+        return tarfile.tar_filter(member, path)
+    return tarfile.data_filter(member, path)
 
 
 def check_parent(rel):
@@ -289,6 +367,20 @@ def check_manifest(m):
             raise ValueError(f"unknown entry type {kind}")
     for rel in m.get("remove", []):
         check_path(rel)
+    kf = kernel_files(m) + [{"path": r} for r in m.get("remove", []) if kernel_side(r)]
+    zb = [e for e in m["files"] if e["path"].startswith("usr/local/lib/zboot/")]
+    if kf or zb:
+        if int(m.get("min_updater", 1)) < 2:
+            raise ValueError("modules or zboot files need min_updater 2")
+    if kf:
+        k = m.get("kernel")
+        if not isinstance(k, dict) or not k.get("release") or not k.get("vermagic") or \
+                len(str(k.get("config_digest", ""))) != 64:
+            raise ValueError("modules without a kernel (release, vermagic, config_digest)")
+        for e in kf:
+            p = e["path"].split("/")
+            if e["path"].startswith("usr/lib/modules/") and p[3] != k["release"]:
+                raise ValueError(f"module for another release: {e['path']}")
 
 
 def installed():
@@ -320,9 +412,15 @@ def find_update(conf, work):
             why = "refused"
             continue
         if version_key(m["version"]) <= version_key(have.get("version", "0")):
-            return None, why if why != "uptodate" else "uptodate"
+            return None, why
         if int(m.get("min_updater", 1)) > UPDATER_VERSION:
             m["_needs_updater"] = True
+        elif kernel_files(m):
+            why_not = kernel_mismatch(m)
+            if why_not:
+                log("release", tag, ": modules not for this kernel:", why_not)
+                why = "kernel"
+                continue
         m["_tag"] = tag
         m["_key"] = key
         m["_assets"] = assets
@@ -391,6 +489,8 @@ def cmd_apply():
             raise RuntimeError("the release changed since the check; check again")
         if int(m.get("min_updater", 1)) > UPDATER_VERSION:
             raise RuntimeError("needs a newer updater")
+        if kernel_files(m) and kernel_mismatch(m):
+            raise RuntimeError("modules not for this kernel: " + kernel_mismatch(m))
 
         # 2. the package: the delta from the installed version if there is
         #    one, else the full one; its sha256, then every file in it
@@ -408,7 +508,7 @@ def cmd_apply():
         stage = os.path.join(work, "stage")
         os.mkdir(stage)
         with tarfile.open(pp, "r:*") as t:
-            t.extractall(stage, filter="data")
+            t.extractall(stage, filter=stage_filter)
         need = 0
         todo = []
         for e in m["files"]:
@@ -424,6 +524,11 @@ def cmd_apply():
                 raise RuntimeError("file differs from the manifest: " + e["path"])
             else:
                 need += os.path.getsize(src)
+                if e["path"].endswith(".ko") and not NO_MODINFO:
+                    vm = subprocess.run(["modinfo", "-F", "vermagic", src], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, text=True).stdout.strip()
+                    if vm != m["kernel"]["vermagic"]:
+                        raise RuntimeError(f"vermagic of {e['path']}: {vm!r}")
             check_parent(e["path"])   # before anything is written: no symlink on the way
             todo.append(e)
         free = shutil.disk_usage(ROOT).free
@@ -456,6 +561,14 @@ def cmd_apply():
             write_json(os.path.join(VAR, "installed.json"), new)
             journal["done"] = True
             write_json(jpath, journal)
+            changed = journal["replaced"] + journal["created"] + journal["removed"]
+            if any(kernel_side(r) for r in changed):
+                # the next boots are a trial (cmd_boot); the modules' index
+                write_json(os.path.join(VAR, "trial.json"), {"version": m["version"], "boots": 0,
+                                                            "time": int(time.time())})
+                if ROOT == "/" and any(r.startswith("usr/lib/modules/") for r in changed):
+                    subprocess.run(["depmod", "-a", m["kernel"]["release"]], check=False)
+                log("apply: modules changed, the next boots are a trial")
         except Exception:
             log("apply: failed half way, putting back what was changed")
             undo(bdir, journal)
@@ -634,6 +747,10 @@ def cmd_rollback():
     try:
         undo(bdir, j)
         shutil.rmtree(bdir, ignore_errors=True)
+        try:
+            os.remove(os.path.join(VAR, "trial.json"))
+        except OSError:
+            pass
         status("rolled-back", version=j["from_version"], after=j.get("after", "reboot"))
         log("rollback: done, now", j["from_version"])
         tell("omonullOS " + str(j["from_version"]),
@@ -643,6 +760,40 @@ def cmd_rollback():
         log("rollback failed:", repr(e))
         status("failed", msg="rollback: " + str(e))
         return 1
+
+
+def cmd_boot():
+    """Early at boot, before our modules load. Never fails the boot."""
+    tpath = os.path.join(VAR, "trial.json")
+    t = read_json(tpath)
+    if not t:
+        return 0
+    t["boots"] = int(t.get("boots", 0)) + 1
+    write_json(tpath, t)
+    os.sync()
+    log("boot: trial of", t.get("version"), "boot", t["boots"])
+    if t["boots"] <= MAX_TRIAL_BOOTS:
+        return 0
+    log("boot: the phone did not stay up after", t.get("version"), "- putting the old files back")
+    b = last_backup()
+    if b and str(b[1].get("to_version")) == str(t.get("version")):
+        cmd_rollback()
+        status("rolled-back", version=b[1]["from_version"], after="none", auto=True)
+    else:
+        log("boot: no backup for", t.get("version"))
+    try:
+        os.remove(tpath)
+    except OSError:
+        pass
+    return 0
+
+
+def cmd_boot_ok():
+    tpath = os.path.join(VAR, "trial.json")
+    if os.path.exists(tpath):
+        os.remove(tpath)
+        log("boot-ok: the trial passed")
+    return 0
 
 
 def cmd_status():
@@ -655,11 +806,14 @@ def cmd_status():
         print("available:", a["version"], "(" + a.get("_tag", "") + ")")
     b = last_backup()
     print("rollback to:", b[1]["from_version"] if b else "-")
+    t = read_json(os.path.join(VAR, "trial.json"))
+    if t:
+        print("trial:", t.get("version"), "boots", t.get("boots"))
     return 0
 
 
 def main(argv):
-    if not argv or argv[0] not in ("check", "apply", "rollback", "status"):
+    if not argv or argv[0] not in ("check", "apply", "rollback", "status", "boot", "boot-ok"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     if argv[0] == "status":
@@ -681,6 +835,10 @@ def main(argv):
         return cmd_check(quiet="--quiet" in argv)
     if argv[0] == "apply":
         return cmd_apply()
+    if argv[0] == "boot":
+        return cmd_boot()
+    if argv[0] == "boot-ok":
+        return cmd_boot_ok()
     return cmd_rollback()
 
 
