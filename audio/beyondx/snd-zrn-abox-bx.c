@@ -34,17 +34,23 @@
  * The audio power domain (PMU 0x1904) and PLL_AUD0 (1179.648 MHz) are as
  * S-Boot leaves them. Samsung reaches the CMU with 32-bit accesses only.
  *
- * NOT here: Cirrus' speaker protection (spk-prot firmware on the amplifiers'
- * own DSP, and the DSP's reference path). Until it is, the volume stops well
+ * Cirrus' speaker protection (spk-prot firmware on the amplifiers' own DSP)
+ * only with amp_dsp (see "the amps' own DSP"); without it the volume stops well
  * short of full scale (AMP_VOL_MAX).
  *
  * Modified for OmonullOS, October 2026 (new file).
  * Modified for OmonullOS, November 2026: the CS47L93 codec and the two
  * microphones on UAIF0 (codec_state, mic_probe, mic: see "the codec" below).
+ * Modified for OmonullOS, November 2026: the amps are set up again after
+ * every system resume (amps_rescue, amp_rescue).
  * Modified for OmonullOS, November 2026: WDMA1/WDMA7 buffers mapped as stock
  * (bridge_bufs). Modified for OmonullOS, November 2026: the VSS mark is cleared at probe and
  * before every ABOX_START_VSS (ztOS 47f1a79); call_diag (ztOS a9bcb04 and
  * 34e3d32, read where this chip's call DMAs really point).
+ * Modified for OmonullOS, November 2026: dsp_vol_boost (the protected speaker
+ * above AMP_VOL_MAX) and dsp_diag.
+ * Modified for OmonullOS, November 2026: the amps' speaker protection from
+ * stock VENDOR (amp_dsp, cs_dsp; see "the amps' own DSP" below).
  * Modified for OmonullOS, November 2026: call_vi, WDMA4 (stock vi-sensing)
  * through a call: REFEXT4CH's source, whose update starts the VSS uplink.
  *
@@ -62,6 +68,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
 #include <linux/firmware/cirrus/cs_dsp.h>
+#include <linux/firmware/cirrus/wmfw.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
 #include <linux/interrupt.h>
@@ -74,6 +81,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/sizes.h>
+#include <linux/suspend.h>
 #include <linux/workqueue.h>
 #include <sound/control.h>
 #include <sound/core.h>
@@ -242,6 +250,7 @@ static const u32 core_power[2] = { 0x2d80, 0x2e00 };
 /* AMP_DIG_VOL_CTRL's PCM volume: 0.125 dB steps, two's complement, 0 = 0 dB */
 #define AMP_VOL_MIN		(-816)		/* -102 dB */
 #define AMP_VOL_MAX		(-48)		/* -6 dB; see the note on protection above */
+#define AMP_VOL_MAX_DSP		0		/* 0 dB, stock's own, only with the protection */
 
 /*
  * graph=1: stock's speaker graph (mixer_paths media-speaker). The AP's stream
@@ -500,7 +509,10 @@ static int ipc_send(const u32 *words, int n)
 	spin_lock_irqsave(&tx_lock, flags);
 	/* a full ring waits for the DSP to take some, ringing it again as
 	 * abox_ipc_retry does (the start-up burst fills all 16 commands, and a
-	 * dropped OPEN leaves the stream closed for good) */
+	 * dropped OPEN leaves the stream closed for good). Only once a
+	 * millisecond: stock abox_msg_send spins without ringing, and a ring
+	 * every 10 us made the firmware report INTERRUPT STORMING, overflow its
+	 * ISR queue and stop taking commands until reboot (11-14 14:48). */
 	for (tries = 0; ; tries++) {
 		if (READ_ONCE(q->data_s) > q->data_e) {
 			blank = q->data_s - q->data_e;
@@ -517,7 +529,8 @@ static int ipc_send(const u32 *words, int n)
 			ret = -EBUSY;
 			goto out;
 		}
-		writel(BIT(16) | MSG_IRQ, gicd + 0xf00);
+		if (tries % 100 == 0)
+			writel(BIT(16) | MSG_IRQ, gicd + 0xf00);
 		spin_unlock_irqrestore(&tx_lock, flags);
 		udelay(10);
 		spin_lock_irqsave(&tx_lock, flags);
@@ -1438,12 +1451,17 @@ struct amp {
 	bool boost;			/* stock: boost on the speaker, off the earpiece */
 	struct i2c_client *client;
 	struct regmap *regmap;
-	struct cs_dsp dsp;		/* never started: the library only reads it */
+	struct cs_dsp dsp;		/* the speaker protection (amp_dsp), else only read */
 	bool on;
+	const char *fw;			/* stock VENDOR's name: cs35l40-<fw>-dsp1-spk-prot.* */
+	bool dsp_init, fw_loaded, dsp_failed;
+	bool dsp_routed;		/* it plays the DSP's output (dsp_vol_boost) */
+	bool dsp_reinit_due;		/* run, not yet REINIT with the amp on (dsp_run_reinit) */
+	bool loading;			/* spk_load() running: no power-up meanwhile */
 };
 static struct amp amps[] = {
-	{ AMP_BOT, 1, "bottom speaker", true },
-	{ AMP_RCV, 0, "earpiece", false },
+	{ AMP_BOT, 1, "bottom speaker", true, .fw = "bot" },
+	{ AMP_RCV, 0, "earpiece", false, .fw = "rcv" },
 };
 
 /* which amps play: bit 0 the bottom speaker (stock media-speaker), bit 1 the
@@ -1465,6 +1483,9 @@ static int call_amp_mask = 2;
 module_param_cb(call_amp_mask, &amp_mask_ops, &call_amp_mask, 0644);
 MODULE_PARM_DESC(call_amp_mask, "amp_mask while call=1 (stock handset: 2, earpiece)");
 static int amp_volume = -160;		/* -20 dB */
+/* added to the volume of an amp playing through its protection (amp_dsp), up to
+ * 0 dB; the others stay at AMP_VOL_MAX. 0.125 dB steps, 0 = as before */
+static int dsp_vol_boost;
 
 /* AMP_GAIN_PCM: 0 is mute (mainline's amp_gain_tlv), n = n - 0.5 dB, and it
  * resets to 0; stock leaves it to the DSP's protection tuning */
@@ -1498,8 +1519,11 @@ static const struct reg_sequence pdn_patch[] = {
 
 static void amp_volume_write(struct amp *a)
 {
+	int v = a->dsp_routed ? min(amp_volume + dsp_vol_boost, AMP_VOL_MAX_DSP) :
+				min(amp_volume, AMP_VOL_MAX);
+
 	regmap_update_bits(a->regmap, CS35L41_AMP_DIG_VOL_CTRL, CS35L41_AMP_PCM_VOL_MASK,
-			   (amp_volume & 0x7ff) << CS35L41_AMP_PCM_VOL_SHIFT);
+			   (v & 0x7ff) << CS35L41_AMP_PCM_VOL_SHIFT);
 }
 
 /* mainline cs35l41_probe and the codec's dai set-up, as far as used here */
@@ -1597,6 +1621,690 @@ static int amp_probe(struct amp *a)
 }
 
 /*
+ * ---- the amps' own DSP: Cirrus speaker protection (CSPL) -------------------
+ *
+ * Stock plays the speaker through the CS35L40's HALO DSP running Cirrus'
+ * speaker protection, which watches the coil (VMON/IMON) and keeps it in its
+ * limits; only with it does stock go to 0 dB (AMP_VOL_MAX is -6 dB here
+ * without it). The firmware and its tuning are stock VENDOR's own
+ * (cs35l40-{bot,rcv}-dsp1-spk-prot.{wmfw,bin}, "BYX_18dB": tuned for AMP PCM
+ * Gain 18), copied to /usr/lib/firmware by zvendor-firmware. As mainline's
+ * cs35l41_hda.c does it (cs_dsp, no ASoC): loaded in the background after the
+ * amps are set up (~26 KB per amp over the bit-banged bus, a few seconds),
+ * started on the first play (it needs the bit clock), paused when the amp goes
+ * off, loaded again after a resume (the amps lose power). Until it runs, or if
+ * it fails, the amp plays ASPRX1 itself as before. Calibration as stock's
+ * cirrus-cal.c without saved values (this phone's EFS has no cirrus/): RDC
+ * 8580, 23 C. See docs/s10-5g/SPK-PROT.md.
+ */
+#define CSPL_ALG		0xcd		/* the firmware's CSPL algorithm */
+#define HALO_ALG		0x400a4		/* FIRMWARE_HALO_CSPL: HALO_STATE */
+#define HALO_STATE_RUN		2
+static int amp_dsp;
+static int amp_dsp_set(const char *arg, const struct kernel_param *kp);
+static const struct kernel_param_ops amp_dsp_ops = { .set = amp_dsp_set, .get = param_get_int };
+module_param_cb(amp_dsp, &amp_dsp_ops, &amp_dsp, 0644);
+MODULE_PARM_DESC(amp_dsp, "speaker protection on: bit 0 bottom speaker, bit 1 earpiece (0: as before)");
+static int dsp_gain = 18;		/* stock mixer_gains.xml, the tuning's "18dB" */
+module_param(dsp_gain, int, 0444);
+MODULE_PARM_DESC(dsp_gain, "AMP PCM Gain while the protection runs (stock 18)");
+
+/*
+ * HALO RX/TX sample-rate selectors at the first run. Stock beyondx has no
+ * cirrus,use-fsync-errata, so wm_adsp writes its kcalloc'd rate cache: all 0.
+ * Mainline's cs35l41_write_fs_errata writes 1, which belongs with
+ * VIMON_SPKMON_RESYNC = 0; here that register reads back 1 (as on stock), and
+ * with rates 1 the protection saw no IMON/VMON (ipeak/vpeak 0, temp flat at
+ * ambient with spikes to 151 C). 0 = stock (default), 1 = mainline errata.
+ */
+static int dsp_fs_errata;
+module_param(dsp_fs_errata, int, 0644);
+MODULE_PARM_DESC(dsp_fs_errata, "DSP rate selectors at run: 0 stock (all 0), 1 mainline fs errata (all 1)");
+/*
+ * the coil's RDC the protection models from. Stock reads it from
+ * /efs/cirrus/rdc_cal (absent here) else 8580; a good dsp_calibrate sets it
+ * to the measured value. Writable for a saved value at boot (Q13 of
+ * 1/5.85714 ohm: 5600..14000 = about 4..10 ohm), taken at the next run/REINIT.
+ */
+#define SPK_RDC_MIN		5600
+#define SPK_RDC_MAX		14000
+static int dsp_cal_r = 8580, dsp_cal_ambient = 23;	/* stock's defaults */
+static int dsp_cal_r_set(const char *arg, const struct kernel_param *kp)
+{
+	int v, ret = kstrtoint(arg, 0, &v);
+
+	if (ret)
+		return ret;
+	if (v < SPK_RDC_MIN || v > SPK_RDC_MAX)
+		return -EINVAL;
+	WRITE_ONCE(dsp_cal_r, v);
+	return 0;
+}
+static const struct kernel_param_ops dsp_cal_r_ops = { .set = dsp_cal_r_set, .get = param_get_int };
+module_param_cb(dsp_cal_r, &dsp_cal_r_ops, &dsp_cal_r, 0644);
+MODULE_PARM_DESC(dsp_cal_r, "bottom speaker RDC for the protection (stock default 8580; 5600..14000)");
+module_param(dsp_cal_ambient, int, 0444);
+/*
+ * IMON/VMON reached the protection only after a REINIT (ipeak/vpeak 0 and the
+ * coil temperature flat at ambient until a dsp_calibrate; then they moved).
+ * 1 = once per run, dsp_reinit_ms after the amp first goes on with it:
+ * STOP_PRE_REINIT, the calibration again, REINIT. 0 = not (default for now).
+ * Done ~46 ms after the run (ed124b1) it left CSPL_STATE 1 (error) for good,
+ * and a dsp_calibrate was then refused; so later, and only from state 0.
+ * dsp_reinit (write 1) does the same REINIT by hand, the amp on.
+ */
+static int dsp_run_reinit;
+module_param(dsp_run_reinit, int, 0644);
+MODULE_PARM_DESC(dsp_run_reinit, "one REINIT of the protection dsp_reinit_ms after the first amp on of a run (1) or not (0, default)");
+static int dsp_reinit_ms = 1000;
+module_param(dsp_reinit_ms, int, 0644);
+/*
+ * After a resume the protection is loaded again (~6 s of 100 kHz I2C, the amp's
+ * bus taken: a sound then waits it out and the notification is lost, 14.11
+ * 15:44 and 16:18). So it waits: dsp_resume_ms after the wake, and then until
+ * nothing has played for 5 s. A wake for an SMS sleeps again within ~20 s and
+ * never loads it; its sounds play plain (the amp alone, as before amp_dsp).
+ */
+static int dsp_resume_ms = 30000;
+module_param(dsp_resume_ms, int, 0644);
+MODULE_PARM_DESC(dsp_resume_ms, "after a resume: ms before the protection is loaded again");
+static unsigned long last_sound;	/* jiffies: a stream started or closed; 0 none yet */
+#define DSP_QUIET	(5 * HZ)
+MODULE_PARM_DESC(dsp_reinit_ms, "how long the amp plays through the protection before dsp_run_reinit's REINIT (ms, 100..10000)");
+static struct delayed_work dsp_reinit_work;
+static char dsp_state[64] = "off";
+module_param_string(dsp_state, dsp_state, sizeof(dsp_state), 0444);
+MODULE_PARM_DESC(dsp_state, "the protection now, per amp: off, loading, loaded, running, failed");
+
+static int dsp_vol_boost_set(const char *arg, const struct kernel_param *kp)
+{
+	int v, i, ret = kstrtoint(arg, 0, &v);
+
+	if (ret)
+		return ret;
+	mutex_lock(&amp_lock);
+	dsp_vol_boost = clamp(v, 0, AMP_VOL_MAX_DSP - AMP_VOL_MIN);
+	for (i = 0; i < ARRAY_SIZE(amps); i++)
+		if (amps[i].regmap)
+			amp_volume_write(&amps[i]);
+	mutex_unlock(&amp_lock);
+	pr_info("snd-zrn-abox-bx: dsp_vol_boost %d (+%d.%03d dB)\n", dsp_vol_boost,
+		dsp_vol_boost / 8, dsp_vol_boost % 8 * 125);
+	return 0;
+}
+static const struct kernel_param_ops dsp_vol_boost_ops = { .set = dsp_vol_boost_set, .get = param_get_int };
+module_param_cb(dsp_vol_boost, &dsp_vol_boost_ops, &dsp_vol_boost, 0644);
+MODULE_PARM_DESC(dsp_vol_boost, "added to the volume while the protection runs, 0.125 dB steps, total up to 0 dB");
+static DEFINE_MUTEX(dsp_lock);		/* a->dsp; taken after amp_lock, never before it */
+static struct delayed_work dsp_load_work;
+/* freezable: a suspend waits for a load to end, never cuts its I2C */
+static void dsp_load_later(unsigned int ms)
+{
+	mod_delayed_work(system_freezable_wq, &dsp_load_work, msecs_to_jiffies(ms));
+}
+static const struct cs_dsp_client_ops spk_client_ops;	/* no ALSA controls for them */
+static const char spk_fw_name[] = "spk-prot";
+
+static void dsp_state_update(void)
+{
+	int i, n = 0;
+
+	for (i = 0; i < ARRAY_SIZE(amps); i++) {
+		struct amp *a = &amps[i];
+
+		n += scnprintf(dsp_state + n, sizeof(dsp_state) - n, "%s%s:%s", i ? " " : "", a->fw,
+			       a->dsp_failed ? "failed" : a->dsp.running ? "running" :
+			       a->fw_loaded ? "loaded" : (amp_dsp & BIT(i)) ? "loading" : "off");
+	}
+}
+
+static int spk_ctl_write(struct amp *a, const char *name, unsigned int alg, u32 v)
+{
+	__be32 b = cpu_to_be32(v);
+	struct cs_dsp_coeff_ctl *ctl;
+	int ret;
+
+	mutex_lock(&a->dsp.pwr_lock);
+	ctl = cs_dsp_get_ctl(&a->dsp, name, WMFW_ADSP2_XM, alg);
+	ret = ctl ? cs_dsp_coeff_write_ctrl(ctl, 0, &b, sizeof(b)) : -ENOENT;
+	mutex_unlock(&a->dsp.pwr_lock);
+	return ret < 0 ? ret : 0;	/* 1 = written and the value changed */
+}
+
+static int spk_ctl_read(struct amp *a, const char *name, unsigned int alg, u32 *v)
+{
+	struct cs_dsp_coeff_ctl *ctl;
+	__be32 b = 0;
+	int ret;
+
+	mutex_lock(&a->dsp.pwr_lock);
+	ctl = cs_dsp_get_ctl(&a->dsp, name, WMFW_ADSP2_XM, alg);
+	ret = ctl ? cs_dsp_coeff_read_ctrl(ctl, 0, &b, sizeof(b)) : -ENOENT;
+	mutex_unlock(&a->dsp.pwr_lock);
+	*v = be32_to_cpu(b);
+	return ret;
+}
+
+/* wmfw and tuning into the DSP's memories, the calibration after; dsp_lock held */
+static int spk_load(struct amp *a)
+{
+	const struct firmware *wmfw = NULL, *coeff = NULL;
+	struct device *dev = &a->client->dev;
+	char wname[64], cname[64];
+	int ret;
+
+	if (!a->dsp_init) {
+		cs35l41_configure_cs_dsp(dev, a->regmap, &a->dsp);
+		a->dsp.client_ops = &spk_client_ops;
+		ret = cs_dsp_halo_init(&a->dsp);
+		if (ret)
+			return ret;
+		a->dsp_init = true;
+	}
+	snprintf(wname, sizeof(wname), "cs35l40-%s-dsp1-spk-prot.wmfw", a->fw);
+	snprintf(cname, sizeof(cname), "cs35l40-%s-dsp1-spk-prot.bin", a->fw);
+	ret = request_firmware(&wmfw, wname, dev);
+	if (!ret)
+		ret = request_firmware(&coeff, cname, dev);
+	if (!ret)
+		ret = cs_dsp_power_up(&a->dsp, wmfw, wname, coeff, cname, spk_fw_name);
+	release_firmware(wmfw);
+	release_firmware(coeff);
+	if (ret)
+		return ret;
+	dev_info(dev, "%s: speaker protection loaded (fw %06x v%06x)\n",
+		 a->name, a->dsp.fw_id, a->dsp.fw_id_version);
+	return 0;
+}
+
+/*
+ * stock cirrus_cal_apply_*(): status 1, checksum = status + rdc. CAL_R, CAL_STATUS
+ * and CAL_CHECKSUM are volatile in this wmfw (flags 7): cs_dsp writes them only
+ * while the core runs (-EPERM before), so this goes after cs_dsp_run().
+ */
+static int spk_cal(struct amp *a)
+{
+	int ret;
+
+	ret = spk_ctl_write(a, "CAL_R", CSPL_ALG, dsp_cal_r);
+	if (!ret)
+		ret = spk_ctl_write(a, "CAL_AMBIENT", CSPL_ALG, dsp_cal_ambient);
+	if (!ret)
+		ret = spk_ctl_write(a, "CAL_STATUS", CSPL_ALG, 1);
+	if (!ret)
+		ret = spk_ctl_write(a, "CAL_CHECKSUM", CSPL_ALG, 1 + dsp_cal_r);
+	return ret;
+}
+
+/* the first play: start the core with the bit clock running; dsp_lock held */
+static int spk_run(struct amp *a)
+{
+	struct device *dev = &a->client->dev;
+	unsigned int sts = 0;
+	u32 halo = 0;
+	int i, ret;
+
+	regmap_write(a->regmap, CS35L41_DSP_CLK_CTRL, 0x3);	/* DSP clock on */
+	if (dsp_fs_errata) {
+		ret = cs35l41_write_fs_errata(dev, a->regmap);
+	} else {
+		for (i = 0, ret = 0; i < 8 && !ret; i++) {
+			ret = regmap_write(a->regmap, CS35L41_DSP1_RX1_RATE + 8 * i, 0);
+			if (!ret)
+				ret = regmap_write(a->regmap, CS35L41_DSP1_TX1_RATE + 8 * i, 0);
+		}
+		usleep_range(300, 400);		/* wm_halo_set_rate_block's udelay */
+	}
+	if (!ret)
+		ret = cs_dsp_run(&a->dsp);
+	if (ret)
+		goto fail;
+	for (i = 0; i < 50; i++) {
+		if (!spk_ctl_read(a, "HALO_STATE", HALO_ALG, &halo) && halo == HALO_STATE_RUN)
+			break;
+		usleep_range(1000, 1100);
+	}
+	regmap_read(a->regmap, CS35L41_DSP_MBOX_2, &sts);
+	if (halo != HALO_STATE_RUN || (sts != CSPL_MBOX_STS_RUNNING && sts != CSPL_MBOX_STS_PAUSED)) {
+		dev_err(dev, "%s: protection did not start (HALO_STATE %u, mbox %u)\n", a->name, halo, sts);
+		ret = -ETIMEDOUT;
+		goto fail;
+	}
+	ret = spk_cal(a);
+	if (ret) {
+		dev_err(dev, "%s: calibration not written (%d)\n", a->name, ret);
+		goto fail;
+	}
+	ret = cs35l41_set_cspl_mbox_cmd(dev, a->regmap, CSPL_MBOX_CMD_PAUSE);
+	if (ret)
+		goto fail;
+	dev_info(dev, "%s: speaker protection running, cal R %d ambient %d\n",
+		 a->name, dsp_cal_r, dsp_cal_ambient);
+	return 0;
+fail:
+	cs_dsp_stop(&a->dsp);
+	a->dsp_failed = true;
+	dev_err(dev, "%s: speaker protection off (%d), the amp plays as before\n", a->name, ret);
+	return ret;
+}
+
+/* the monitor ADCs the protection reads: VPMON 8, VBSTMON 9, TEMPMON 10, VMON 12, IMON 13 */
+#define SPK_MON_EN	(BIT(8) | BIT(9) | BIT(10) | BIT(12) | BIT(13))
+
+/*
+ * the DSP's inputs as stock cs35l41.c wires this CSPL firmware:
+ * RX3/4 VMON/IMON, RX5 VPMON, RX6 CLASSH, RX7 TEMPMON (cs35l41_dsp_init;
+ * mainline hda's RX6 VBSTMON is for its newer firmware), and every
+ * monitor ADC the "DSP1" widget needs powered (VMON, IMON, VPMON,
+ * VBSTMON, TEMPMON: PWR_CTRL2 bits 12, 13, 8, 9, 10). With only VMON
+ * and IMON on, the coil model saturated at 151 C at -3 dB. Stock sets the
+ * sources at codec init, so before the core first runs; so here too.
+ */
+static void spk_inputs(struct amp *a)
+{
+	regmap_write(a->regmap, CS35L41_DSP1_RX1_SRC, CS35L41_INPUT_SRC_ASPRX1);
+	regmap_write(a->regmap, CS35L41_DSP1_RX2_SRC, CS35L41_INPUT_SRC_ASPRX1);
+	regmap_write(a->regmap, CS35L41_DSP1_RX3_SRC, CS35L41_INPUT_SRC_VMON);
+	regmap_write(a->regmap, CS35L41_DSP1_RX4_SRC, CS35L41_INPUT_SRC_IMON);
+	regmap_write(a->regmap, CS35L41_DSP1_RX5_SRC, CS35L41_INPUT_SRC_VPMON);
+	regmap_write(a->regmap, CS35L41_DSP1_RX6_SRC, CS35L41_INPUT_SRC_CLASSH);
+	regmap_write(a->regmap, CS35L41_DSP1_RX7_SRC, CS35L41_INPUT_SRC_TEMPMON);
+	regmap_update_bits(a->regmap, CS35L41_PWR_CTRL2, SPK_MON_EN, SPK_MON_EN);
+}
+
+/* what the amp plays, set before it goes on: the DSP's output, or ASPRX1 */
+static bool spk_route(struct amp *a, int i)
+{
+	bool dsp = false;
+
+	if ((READ_ONCE(amp_dsp) & BIT(i)) && mutex_trylock(&dsp_lock)) {
+		if (a->fw_loaded && !a->dsp_failed) {
+			if (a->dsp.running) {
+				dsp = true;
+			} else {
+				spk_inputs(a);
+				if (!spk_run(a)) {
+					dsp = true;
+					a->dsp_reinit_due = true;
+				}
+			}
+		}
+		mutex_unlock(&dsp_lock);
+	}
+	if (dsp) {
+		spk_inputs(a);
+		regmap_write(a->regmap, CS35L41_DAC_PCM1_SRC, CS35L41_INPUT_DSP_TX1);
+	} else {
+		regmap_write(a->regmap, CS35L41_DAC_PCM1_SRC, CS35L41_INPUT_SRC_ASPRX1);
+	}
+	regmap_update_bits(a->regmap, CS35L41_AMP_GAIN_CTRL, CS35L41_AMP_GAIN_PCM_MASK,
+			   clamp(dsp ? dsp_gain : amp_gain, 0, CS35L41_AMP_GAIN_PCM_MAX) <<
+			   CS35L41_AMP_GAIN_PCM_SHIFT);
+	a->dsp_routed = dsp;
+	amp_volume_write(a);
+	dsp_state_update();
+	return dsp;
+}
+
+/* the DSP's state goes with the amp's power (amps_rescue): dsp_lock held */
+static void spk_forget(struct amp *a)
+{
+	if (a->dsp_init)
+		cs_dsp_remove(&a->dsp);
+	memset(&a->dsp, 0, sizeof(a->dsp));
+	a->dsp_init = a->fw_loaded = a->dsp_failed = a->dsp_routed = false;
+	a->dsp_reinit_due = false;
+}
+
+static void amp_power(struct amp *a, bool on);
+
+/*
+ * the background load: never holds amp_lock while it holds dsp_lock. It
+ * starts only after 5 s with nothing played (re-checked each second). A sound
+ * during it cannot play anyway (the bus is the load's: its power-up came only
+ * at the end and failed -110, 14.11 16:18), so that amp is left off and
+ * powered up after the load.
+ */
+static void dsp_load_fn(struct work_struct *work)
+{
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(amps); i++) {
+		struct amp *a = &amps[i];
+		bool replay;
+
+		if (!(READ_ONCE(amp_dsp) & BIT(i)) || READ_ONCE(a->fw_loaded) || a->dsp_failed)
+			continue;
+		mutex_lock(&amp_lock);
+		if (READ_ONCE(active) || READ_ONCE(call_on) ||
+		    (READ_ONCE(last_sound) && time_before(jiffies, READ_ONCE(last_sound) + DSP_QUIET))) {
+			mutex_unlock(&amp_lock);
+			dsp_load_later(1000);
+			return;
+		}
+		WRITE_ONCE(a->loading, true);
+		mutex_unlock(&amp_lock);
+		mutex_lock(&dsp_lock);
+		if (!a->regmap || a->fw_loaded || a->dsp_failed) {
+			WRITE_ONCE(a->loading, false);
+			mutex_unlock(&dsp_lock);
+			continue;
+		}
+		ret = spk_load(a);
+		if (ret) {
+			a->dsp_failed = true;
+			dev_err(&a->client->dev, "%s: speaker protection not loaded (%d)\n", a->name, ret);
+		}
+		WRITE_ONCE(a->fw_loaded, !ret);
+		WRITE_ONCE(a->loading, false);
+		mutex_unlock(&dsp_lock);
+		dsp_state_update();
+		/* playing already: through the DSP from now on */
+		mutex_lock(&amp_lock);
+		replay = a->on && !ret;
+		if (replay) {
+			amp_power(a, false);
+			amp_power(a, true);
+		}
+		mutex_unlock(&amp_lock);
+		/* a sound that started while it loaded: its power-up was left out */
+		if (READ_ONCE(active) || READ_ONCE(call_on))
+			amps_power(true);
+	}
+}
+
+static int amp_dsp_set(const char *arg, const struct kernel_param *kp)
+{
+	int ret = param_set_int(arg, kp);
+
+	if (ret)
+		return ret;
+	dsp_state_update();
+	if (bb_added)
+		dsp_load_later(0);
+	return 0;
+}
+
+/*
+ * dsp_diag: what the running protection reports, raw (read to watch the coil
+ * while the volume goes up): HALO_HEARTBEAT grows while it runs, CSPL_STATE 0 =
+ * running (1 error), the BDLOG_* maxima/counters since it was loaded (OVER_*
+ * and ABNORMAL_MUTE should stay 0), and the last peaks and output power.
+ */
+static const struct { const char *tag, *ctl; unsigned int alg; } spk_diag_ctls[] = {
+	{ "hb", "HALO_HEARTBEAT", HALO_ALG },
+	{ "state", "CSPL_STATE", CSPL_ALG },
+	{ "temp", "CSPL_TEMPERATURE", CSPL_ALG },
+	{ "calset", "CAL_SET_STATUS", CSPL_ALG },
+	{ "maxtemp", "BDLOG_MAX_TEMP", CSPL_ALG },
+	{ "maxexc", "BDLOG_MAX_EXC", CSPL_ALG },
+	{ "overtemp", "BDLOG_OVER_TEMP_COUNT", CSPL_ALG },
+	{ "overexc", "BDLOG_OVER_EXC_COUNT", CSPL_ALG },
+	{ "mute", "BDLOG_ABNORMAL_MUTE", CSPL_ALG },
+	{ "power", "CSPL_SPK_OUTPUT_POWER", CSPL_ALG },
+	{ "ipeak", "CSPL_CURRENT_PEAK", CSPL_ALG },
+	{ "vpeak", "CSPL_VOLTAGE_PEAK", CSPL_ALG },
+	{ "gain", "CSPL_OVERSIGHT_GAIN", CSPL_ALG },
+	{ "reduce", "REDUCE_POWER", CSPL_ALG },
+};
+
+static int dsp_diag_get(char *buf, const struct kernel_param *kp)
+{
+	int i, j, n = 0;
+
+	mutex_lock(&dsp_lock);
+	for (i = 0; i < ARRAY_SIZE(amps); i++) {
+		struct amp *a = &amps[i];
+
+		if (!a->dsp.running)
+			continue;
+		n += scnprintf(buf + n, PAGE_SIZE - n, "%s%s:", n ? " | " : "", a->fw);
+		for (j = 0; j < ARRAY_SIZE(spk_diag_ctls); j++) {
+			u32 v;
+			int ret = spk_ctl_read(a, spk_diag_ctls[j].ctl, spk_diag_ctls[j].alg, &v);
+
+			if (ret < 0)
+				n += scnprintf(buf + n, PAGE_SIZE - n, " %s=E%d", spk_diag_ctls[j].tag, ret);
+			else
+				n += scnprintf(buf + n, PAGE_SIZE - n, " %s=%u", spk_diag_ctls[j].tag, v);
+		}
+		/* the inputs as the amp has them now (RX1..RX7 sources, PWR_CTRL2) */
+		{
+			unsigned int r, pwr = 0;
+
+			n += scnprintf(buf + n, PAGE_SIZE - n, " rx=");
+			for (j = 0; j < 7; j++) {
+				r = 0;
+				regmap_read(a->regmap, CS35L41_DSP1_RX1_SRC + 4 * j, &r);
+				n += scnprintf(buf + n, PAGE_SIZE - n, "%s%02x", j ? "," : "", r);
+			}
+			regmap_read(a->regmap, CS35L41_PWR_CTRL2, &pwr);
+			n += scnprintf(buf + n, PAGE_SIZE - n, " pwr2=%04x", pwr);
+			/* rate selectors RX1/RX3/RX4 and VIMON resync (dsp_fs_errata) */
+			n += scnprintf(buf + n, PAGE_SIZE - n, " rate=");
+			for (j = 0; j < 4; j++) {
+				if (j == 1)
+					continue;
+				r = 0xff;
+				regmap_read(a->regmap, CS35L41_DSP1_RX1_RATE + 8 * j, &r);
+				n += scnprintf(buf + n, PAGE_SIZE - n, "%s%x", j ? "," : "", r);
+			}
+			r = 0xff;
+			regmap_read(a->regmap, CS35L41_VIMON_SPKMON_RESYNC, &r);
+			n += scnprintf(buf + n, PAGE_SIZE - n, " resync=%x", r);
+		}
+	}
+	mutex_unlock(&dsp_lock);
+	if (!n)
+		n = scnprintf(buf, PAGE_SIZE, "not running");
+	n += scnprintf(buf + n, PAGE_SIZE - n, "\n");
+	return n;
+}
+static const struct kernel_param_ops dsp_diag_ops = { .get = dsp_diag_get };
+module_param_cb(dsp_diag, &dsp_diag_ops, NULL, 0444);
+MODULE_PARM_DESC(dsp_diag, "the running protection's state and coil log, raw");
+
+/*
+ * dsp_calibrate: stock cirrus-cal.c's measurement of the coil's resistance
+ * through VMON/IMON, here to see whether those reach the protection at all
+ * (and, later, for this phone's own RDC). Write the ambient temperature in C
+ * while the bottom speaker plays through the protection (silence is enough):
+ * STOP_PRE_REINIT, the -spk-prot-calib.bin tuning, DSP inputs and noise gate
+ * off, the amp at 0 dB, REINIT, CAL_STATUS polled up to dsp_cal_ms; then the
+ * playback tuning, volume and calibration back the same way. dsp_cal_result
+ * has the outcome; a good one (status 1, checksum ok, RDC in range) becomes
+ * dsp_cal_r until reboot.
+ */
+int zrn_cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *fw, const char *file);
+static char dsp_cal_result[192] = "none";
+module_param_string(dsp_cal_result, dsp_cal_result, sizeof(dsp_cal_result), 0444);
+MODULE_PARM_DESC(dsp_cal_result, "the last dsp_calibrate: CAL_STATUS, CAL_R (ohms), checksum, CSPL_STATE");
+#define CS35L41_NGATE_CH2_CFG	(CS35L41_MIXER_NGATE_CH1_CFG + 4)
+#define SPK_NG_EN		BIT(16)
+#define SPK_CAL_MS		1250	/* stock CS35L41_CAL_COMPLETE_DELAY_MS */
+static unsigned int dsp_cal_ms = SPK_CAL_MS;
+module_param(dsp_cal_ms, uint, 0644);
+MODULE_PARM_DESC(dsp_cal_ms, "dsp_calibrate: the longest wait for CAL_STATUS, ms (stock 1250, 300..10000)");
+
+/* stock's mailbox handshake: the command, then up to ~150 ms for the state */
+static int spk_mbox(struct amp *a, u32 cmd, u32 want)
+{
+	unsigned int sts = 0xdead;
+	int i;
+
+	regmap_write(a->regmap, CS35L41_DSP_VIRT1_MBOX_1, cmd);
+	for (i = 0; i < 100; i++) {
+		usleep_range(1000, 1500);
+		if (!regmap_read(a->regmap, CS35L41_DSP_MBOX_2, &sts) && sts == want)
+			return 0;
+	}
+	dev_err(&a->client->dev, "%s: mailbox %u: state %u, not %u\n", a->name, cmd, sts, want);
+	return -ETIMEDOUT;
+}
+
+static int spk_coeff(struct amp *a, const char *what)
+{
+	const struct firmware *fw;
+	char name[64];
+	int ret;
+
+	snprintf(name, sizeof(name), "cs35l40-%s-dsp1-%s.bin", a->fw, what);
+	ret = request_firmware(&fw, name, &a->client->dev);
+	if (ret)
+		return ret;
+	ret = zrn_cs_dsp_load_coeff(&a->dsp, fw, name);
+	release_firmware(fw);
+	return ret;
+}
+
+/* amp_lock and dsp_lock held, the amp on and playing through the protection */
+static int spk_calibrate(struct amp *a, int ambient)
+{
+	struct device *dev = &a->client->dev;
+	u32 st = 0, r = 0, ck = 0, cs = 0, amb = 0;
+	unsigned int rx1 = 0, rx2 = 0, ng1 = 0, ng2 = 0, vol = 0;
+	unsigned long long ohm;
+	bool kept = false;
+	char trace[96] = "";
+	int ret, ret2;
+
+	spk_ctl_read(a, "CSPL_STATE", CSPL_ALG, &cs);
+	if (cs == 1)
+		dev_warn(dev, "%s: CSPL_STATE 1 already before the calibration\n", a->name);
+	spk_ctl_write(a, "CAL_STATUS", CSPL_ALG, 0);
+	spk_ctl_write(a, "CAL_R", CSPL_ALG, 0);
+	spk_ctl_write(a, "CAL_CHECKSUM", CSPL_ALG, 0);
+	regmap_read(a->regmap, CS35L41_DSP1_RX1_SRC, &rx1);
+	regmap_read(a->regmap, CS35L41_DSP1_RX2_SRC, &rx2);
+	regmap_read(a->regmap, CS35L41_MIXER_NGATE_CH1_CFG, &ng1);
+	regmap_read(a->regmap, CS35L41_NGATE_CH2_CFG, &ng2);
+	regmap_read(a->regmap, CS35L41_AMP_DIG_VOL_CTRL, &vol);
+
+	ret = spk_mbox(a, CSPL_MBOX_CMD_STOP_PRE_REINIT, CSPL_MBOX_STS_RDY_FOR_REINIT);
+	if (ret)
+		goto restore;
+	ret = spk_coeff(a, "spk-prot-calib");
+	if (ret) {
+		dev_err(dev, "%s: calibration tuning not loaded (%d)\n", a->name, ret);
+		goto restore;
+	}
+	regmap_write(a->regmap, CS35L41_DSP1_RX1_SRC, 0);
+	regmap_write(a->regmap, CS35L41_DSP1_RX2_SRC, 0);
+	regmap_write(a->regmap, CS35L41_MIXER_NGATE_CH1_CFG, ng1 & ~SPK_NG_EN);
+	regmap_write(a->regmap, CS35L41_NGATE_CH2_CFG, ng2 & ~SPK_NG_EN);
+	/*
+	 * stock measures at the amp's 0 dB: the protection's own cal signal goes
+	 * through AMP_DIG_VOL, and at -24 dB (ctl 624) CAL_STATUS stayed 2
+	 * (incomplete) for 8 s; at 0 dB it was 1 after ~950 ms. The DSP inputs
+	 * are muted above, so nothing of the stream plays at 0 dB.
+	 */
+	regmap_update_bits(a->regmap, CS35L41_AMP_DIG_VOL_CTRL, CS35L41_AMP_PCM_VOL_MASK,
+			   (AMP_VOL_MAX_DSP & 0x7ff) << CS35L41_AMP_PCM_VOL_SHIFT);
+	spk_ctl_write(a, "CAL_AMBIENT", CSPL_ALG, ambient);
+	ret = spk_mbox(a, CSPL_MBOX_CMD_REINIT, CSPL_MBOX_STS_RUNNING);
+	if (ret)
+		goto restore;
+	msleep(85);
+	spk_ctl_read(a, "CSPL_STATE", CSPL_ALG, &cs);
+	if (cs == 1) {
+		dev_err(dev, "%s: calibration tuning refused (CSPL_STATE 1)\n", a->name);
+		ret = -EIO;
+		goto restore;
+	}
+	/*
+	 * stock sleeps 1.25 s and reads once; here CAL_STATUS is polled every
+	 * 100 ms up to dsp_cal_ms, each change logged (status@ms), so a slow
+	 * measurement (2 = incomplete) shows when, or whether, it ends
+	 */
+	{
+		unsigned long t0 = jiffies;
+		unsigned int ms, last = ~0u;
+		int n = 0;
+
+		trace[0] = 0;
+		for (;;) {
+			msleep(100);
+			ms = jiffies_to_msecs(jiffies - t0);
+			spk_ctl_read(a, "CAL_STATUS", CSPL_ALG, &st);
+			if (st != last && n < (int)sizeof(trace) - 16) {
+				n += scnprintf(trace + n, sizeof(trace) - n, " %u@%u", st, ms);
+				last = st;
+			}
+			if ((st != 0 && st != 2 && ms >= 300) || ms >= dsp_cal_ms)
+				break;
+		}
+		n += scnprintf(trace + n, sizeof(trace) - n, " end@%u", ms);
+	}
+	spk_ctl_read(a, "CAL_STATUS", CSPL_ALG, &st);
+	spk_ctl_read(a, "CAL_R", CSPL_ALG, &r);
+	spk_ctl_read(a, "CAL_AMBIENT", CSPL_ALG, &amb);
+	spk_ctl_read(a, "CAL_CHECKSUM", CSPL_ALG, &ck);
+	spk_ctl_read(a, "CSPL_STATE", CSPL_ALG, &cs);
+	/* a good measurement is the RDC from now on (until reboot) */
+	if (st == 1 && ck == st + r && r >= SPK_RDC_MIN && r <= SPK_RDC_MAX && cs != 1) {
+		WRITE_ONCE(dsp_cal_r, r);
+		kept = true;
+	}
+restore:
+	ret2 = spk_mbox(a, CSPL_MBOX_CMD_STOP_PRE_REINIT, CSPL_MBOX_STS_RDY_FOR_REINIT);
+	if (!ret2)
+		ret2 = spk_coeff(a, spk_fw_name);
+	regmap_write(a->regmap, CS35L41_MIXER_NGATE_CH1_CFG, ng1);
+	regmap_write(a->regmap, CS35L41_NGATE_CH2_CFG, ng2);
+	if (!ret2)
+		ret2 = spk_cal(a);
+	if (!ret2)
+		ret2 = spk_mbox(a, CSPL_MBOX_CMD_REINIT, CSPL_MBOX_STS_RUNNING);
+	/* the volume back before the stream reaches the DSP again */
+	regmap_update_bits(a->regmap, CS35L41_AMP_DIG_VOL_CTRL, CS35L41_AMP_PCM_VOL_MASK,
+			   vol & CS35L41_AMP_PCM_VOL_MASK);
+	regmap_write(a->regmap, CS35L41_DSP1_RX1_SRC, rx1);
+	regmap_write(a->regmap, CS35L41_DSP1_RX2_SRC, rx2);
+	if (ret2) {
+		/* the protection's state unknown: off, the amp plays ASPRX1 itself */
+		cs_dsp_stop(&a->dsp);
+		a->dsp_failed = true;
+		regmap_write(a->regmap, CS35L41_DAC_PCM1_SRC, CS35L41_INPUT_SRC_ASPRX1);
+		regmap_update_bits(a->regmap, CS35L41_AMP_GAIN_CTRL, CS35L41_AMP_GAIN_PCM_MASK,
+				   clamp(amp_gain, 0, CS35L41_AMP_GAIN_PCM_MAX) << CS35L41_AMP_GAIN_PCM_SHIFT);
+		a->dsp_routed = false;
+		amp_volume_write(a);
+		dsp_state_update();
+		dev_err(dev, "%s: playback tuning not back (%d), protection off\n", a->name, ret2);
+	}
+	ohm = (unsigned long long)r * 292857 / 50000;	/* stock cs35l41_rdc_to_ohms, Q13 */
+	scnprintf(dsp_cal_result, sizeof(dsp_cal_result),
+		  "%s: ret %d back %d status %u r %u (%llu.%04llu ohm) ambient %u checksum %u (%s) cspl_state %u %s trace%s",
+		  a->fw, ret, ret2, st, r, ohm >> 13, (ohm & 8191) * 10000 >> 13, amb, ck,
+		  ck == st + r ? "ok" : "bad", cs, kept ? "kept" : "not-kept", trace);
+	dev_info(dev, "%s: calibration %s\n", a->name, dsp_cal_result);
+	return ret ?: ret2;
+}
+
+static int dsp_calibrate_set(const char *arg, const struct kernel_param *kp)
+{
+	struct amp *a = &amps[0];	/* the bottom speaker */
+	int ambient, ret = kstrtoint(arg, 0, &ambient);
+
+	if (ret)
+		return ret;
+	if (ambient < 0 || ambient > 60)
+		return -EINVAL;
+	mutex_lock(&amp_lock);
+	mutex_lock(&dsp_lock);
+	if (!a->regmap || !a->on || !a->dsp_routed || !a->dsp.running || a->dsp_failed)
+		ret = -EBUSY;
+	else
+		ret = spk_calibrate(a, ambient);
+	mutex_unlock(&dsp_lock);
+	mutex_unlock(&amp_lock);
+	return ret;
+}
+static const struct kernel_param_ops dsp_calibrate_ops = { .set = dsp_calibrate_set };
+module_param_cb(dsp_calibrate, &dsp_calibrate_ops, NULL, 0200);
+MODULE_PARM_DESC(dsp_calibrate, "measure the bottom speaker's RDC (write the ambient C) while it plays through the protection");
+
+/*
  * ASPTX1/2 on with the amp, off (DOUT hi-Z) without it. One amp alone sends
  * in slots 0 and 2 (stock dev-handset, dev-speaker); both, as stock's
  * dev-dual-speaker, the earpiece 0/2 and the bottom speaker 1/3 (a->slot).
@@ -1616,6 +2324,114 @@ static void amp_tx(struct amp *a, bool on, int mask)
 	regmap_update_bits(a->regmap, CS35L41_SP_ENABLES, en, on ? en : 0);
 }
 
+/*
+ * dsp_run_reinit: the run's one REINIT, the amp just on and playing through
+ * the protection (amp_lock held). As dsp_calibrate's way back: inputs muted,
+ * STOP_PRE_REINIT, the playback tuning and (volatile) calibration again,
+ * REINIT, inputs back. A failed
+ * handshake turns the protection off as there.
+ */
+static void spk_first_reinit(struct amp *a)
+{
+	struct device *dev = &a->client->dev;
+	u32 cs0 = 0, cs1 = 0;
+	unsigned int rx1 = 0, rx2 = 0;
+	int ret;
+
+	if (!mutex_trylock(&dsp_lock))
+		return;			/* still due: the next amp on */
+	if (!a->dsp.running || a->dsp_failed) {
+		a->dsp_reinit_due = false;
+		goto out;
+	}
+	a->dsp_reinit_due = false;
+	spk_ctl_read(a, "CSPL_STATE", CSPL_ALG, &cs0);
+	if (cs0 != 0) {
+		dev_warn(dev, "%s: protection REINIT skipped, CSPL_STATE %u\n", a->name, cs0);
+		goto out;
+	}
+	/*
+	 * exactly dsp_calibrate's way back, the only REINIT seen to work: the
+	 * DSP inputs muted, STOP_PRE_REINIT, the playback tuning loaded AGAIN,
+	 * the calibration, REINIT, the inputs back. A REINIT without the tuning
+	 * reloaded left CSPL_STATE 1 (error) and IMON/VMON 0 (814b55b by hand,
+	 * ed124b1 at 46 ms) - not the timing as first thought.
+	 */
+	regmap_read(a->regmap, CS35L41_DSP1_RX1_SRC, &rx1);
+	regmap_read(a->regmap, CS35L41_DSP1_RX2_SRC, &rx2);
+	regmap_write(a->regmap, CS35L41_DSP1_RX1_SRC, 0);
+	regmap_write(a->regmap, CS35L41_DSP1_RX2_SRC, 0);
+	ret = spk_mbox(a, CSPL_MBOX_CMD_STOP_PRE_REINIT, CSPL_MBOX_STS_RDY_FOR_REINIT);
+	if (!ret)
+		ret = spk_coeff(a, spk_fw_name);
+	if (!ret)
+		ret = spk_cal(a);
+	if (!ret)
+		ret = spk_mbox(a, CSPL_MBOX_CMD_REINIT, CSPL_MBOX_STS_RUNNING);
+	regmap_write(a->regmap, CS35L41_DSP1_RX1_SRC, rx1);
+	regmap_write(a->regmap, CS35L41_DSP1_RX2_SRC, rx2);
+	if (!ret) {
+		msleep(85);		/* as spk_calibrate before its CSPL_STATE check */
+		spk_ctl_read(a, "CSPL_STATE", CSPL_ALG, &cs1);
+	}
+	if (ret) {
+		cs_dsp_stop(&a->dsp);
+		a->dsp_failed = true;
+		regmap_write(a->regmap, CS35L41_DAC_PCM1_SRC, CS35L41_INPUT_SRC_ASPRX1);
+		regmap_update_bits(a->regmap, CS35L41_AMP_GAIN_CTRL, CS35L41_AMP_GAIN_PCM_MASK,
+				   clamp(amp_gain, 0, CS35L41_AMP_GAIN_PCM_MAX) << CS35L41_AMP_GAIN_PCM_SHIFT);
+		a->dsp_routed = false;
+		amp_volume_write(a);
+		dsp_state_update();
+		dev_err(dev, "%s: protection REINIT failed (%d), protection off\n", a->name, ret);
+	} else {
+		dev_info(dev, "%s: protection REINIT with the amp on, cal R %d, CSPL_STATE %u\n",
+			 a->name, dsp_cal_r, cs1);
+	}
+out:
+	mutex_unlock(&dsp_lock);
+}
+
+/* dsp_run_reinit's REINIT, the amp still on and playing through the protection */
+static void dsp_reinit_fn(struct work_struct *work)
+{
+	int i;
+
+	mutex_lock(&amp_lock);
+	for (i = 0; i < ARRAY_SIZE(amps); i++) {
+		struct amp *a = &amps[i];
+
+		if (a->regmap && a->on && a->dsp_routed && a->dsp_reinit_due)
+			spk_first_reinit(a);
+	}
+	mutex_unlock(&amp_lock);
+}
+
+static int dsp_reinit_set(const char *arg, const struct kernel_param *kp)
+{
+	struct amp *a = &amps[0];	/* the bottom speaker */
+	int v, ret = kstrtoint(arg, 0, &v);
+
+	if (ret)
+		return ret;
+	if (v != 1)
+		return -EINVAL;
+	mutex_lock(&amp_lock);
+	if (!a->regmap || !a->on || !a->dsp_routed || !a->dsp.running || a->dsp_failed) {
+		ret = -EBUSY;
+	} else {
+		a->dsp_reinit_due = true;
+		spk_first_reinit(a);
+		ret = a->dsp_reinit_due ? -EBUSY : 0;	/* dsp_lock was taken */
+		a->dsp_reinit_due = false;
+	}
+	mutex_unlock(&amp_lock);
+	return ret;
+}
+static const struct kernel_param_ops dsp_reinit_ops = { .set = dsp_reinit_set };
+module_param_cb(dsp_reinit, &dsp_reinit_ops, NULL, 0200);
+MODULE_PARM_DESC(dsp_reinit, "write 1: REINIT the bottom speaker's protection now (it playing through it)");
+
 /* the "Main AMP" widget's events; only with the bit clock running */
 static void amp_power(struct amp *a, bool on)
 {
@@ -1626,7 +2442,14 @@ static void amp_power(struct amp *a, bool on)
 	if (!a->regmap || a->on == on)
 		return;
 	dev = &a->client->dev;
+	if (on && READ_ONCE(a->loading)) {	/* dsp_load_fn powers it up after */
+		if (debug > 0)
+			dev_info(dev, "%s on: after the protection's load\n", a->name);
+		return;
+	}
 	if (on) {
+		bool dsp = spk_route(a, a - amps);
+
 		/* stock's "Boost Enable" and "AMP Enable Switch" (Main AMP, PWR_CTRL2
 		 * bit 0); without them the amp takes the data and plays nothing */
 		regmap_update_bits(a->regmap, CS35L41_PWR_CTRL2,
@@ -1634,7 +2457,15 @@ static void amp_power(struct amp *a, bool on)
 				   (a->boost ? CS35L41_BST_EN_DEFAULT << CS35L41_BST_EN_SHIFT : 0) | 1);
 		regmap_multi_reg_write_bypassed(a->regmap, pup_patch, ARRAY_SIZE(pup_patch));
 		ret = cs35l41_global_enable(dev, a->regmap, CS35L41_INT_BOOST, 1, &a->dsp);
+		/* stock cs35l41_main_amp_event: the protection resumes with the amp */
+		if (!ret && dsp)
+			ret = cs35l41_set_cspl_mbox_cmd(dev, a->regmap, CSPL_MBOX_CMD_RESUME);
+		if (!ret && dsp && a->dsp_reinit_due && READ_ONCE(dsp_run_reinit))
+			schedule_delayed_work(&dsp_reinit_work,
+					      msecs_to_jiffies(clamp(READ_ONCE(dsp_reinit_ms), 100, 10000)));
 	} else {
+		if (a->dsp.running)
+			cs35l41_set_cspl_mbox_cmd(dev, a->regmap, CSPL_MBOX_CMD_PAUSE);
 		ret = cs35l41_global_enable(dev, a->regmap, CS35L41_INT_BOOST, 0, &a->dsp);
 		regmap_multi_reg_write_bypassed(a->regmap, pdn_patch, ARRAY_SIZE(pdn_patch));
 		regmap_update_bits(a->regmap, CS35L41_PWR_CTRL2,
@@ -1651,6 +2482,11 @@ static void amps_power(bool on)
 	int mask = READ_ONCE(call_on) ? call_amp_mask : amp_mask;
 	int i, pass;
 
+	/* PUP_DONE needs the bit clock: a stream prepared but not yet started
+	 * (active set, UAIF1 off) failed "Enable(1): -110" (14.11 after a resume);
+	 * uaif_on() powers them up 20 ms after it starts */
+	if (on && !(readl(sfr + ABOX_UAIF1_CTRL0) & BIT(0)))
+		return;
 	mutex_lock(&amp_lock);
 	/* the ones going off first: two amps never drive one DOUT slot */
 	for (pass = 0; pass < 2; pass++)
@@ -1695,6 +2531,98 @@ static void amp_on_fn(struct work_struct *work)
 	if (READ_ONCE(active) || READ_ONCE(call_on))
 		amps_power(true);
 }
+
+/*
+ * After a system sleep (SYS_SLEEP, 12.11 4c) both amps NAKed every transfer
+ * ("bottom speaker on: -6") until a reboot: the TOP domain and its pins come
+ * back from reset, and the amps may have seen their rails or nRESET move. So
+ * after every resume (and on amp_rescue=1) they are set up from scratch as at
+ * probe: the bus pins, nRESET low then high, amp_probe() again. The pins are
+ * logged before, to see which part had gone.
+ */
+static unsigned int amp_rescues;
+module_param(amp_rescues, uint, 0444);
+MODULE_PARM_DESC(amp_rescues, "times the amps were set up again (resume, amp_rescue)");
+static int amp_rescue_ret;
+module_param(amp_rescue_ret, int, 0444);
+MODULE_PARM_DESC(amp_rescue_ret, "the last set-up's result (first failing amp)");
+static struct work_struct amp_rescue_work;
+static bool pm_nb_added;
+
+static void amps_rescue(void)
+{
+	int i, ret, first = 0;
+
+	mutex_lock(&amp_lock);
+	pr_info("snd-zrn-abox-bx: amps again: gph0 con %08x dat %02x pud %08x pdn %04x, gph1 con %08x dat %02x pud %08x pdn %04x\n",
+		readl(gpio + GPH0_CON), readl(gpio + GPH0_DAT), readl(gpio + GPH0_PUD),
+		readl(gpio + GPH0_CON + 0x10), readl(gpio + GPH1_CON), readl(gpio + GPH1_DAT),
+		readl(gpio + GPH1_CON + 0x8), readl(gpio + GPH1_CON + 0x10));
+	for (i = 0; i < ARRAY_SIZE(amps); i++) {
+		struct amp *a = &amps[i];
+
+		mutex_lock(&dsp_lock);
+		spk_forget(a);
+		mutex_unlock(&dsp_lock);
+		if (a->regmap)
+			regmap_exit(a->regmap);
+		if (a->client)
+			i2c_unregister_device(a->client);
+		a->regmap = NULL;
+		a->client = NULL;
+		a->on = false;
+	}
+	bus_pins_setup();
+	amps_reset(false);
+	usleep_range(2000, 3000);	/* nRESET low: over 1 ms */
+	amps_reset(true);
+	usleep_range(5000, 6000);	/* out of reset, before I2C */
+	for (i = 0; i < ARRAY_SIZE(amps); i++) {
+		ret = amp_probe(&amps[i]);
+		if (ret) {
+			pr_warn("snd-zrn-abox-bx: %s not set up again (%d)\n", amps[i].name, ret);
+			if (amps[i].regmap) {
+				regmap_exit(amps[i].regmap);
+				amps[i].regmap = NULL;
+			}
+			if (!first)
+				first = ret;
+		}
+	}
+	amp_rescues++;
+	amp_rescue_ret = first;
+	mutex_unlock(&amp_lock);
+	dsp_state_update();
+	if (amp_dsp)
+		dsp_load_later(clamp(READ_ONCE(dsp_resume_ms), 0, 600000));
+	/* a ring may have started while they were away */
+	if (READ_ONCE(active) || READ_ONCE(call_on))
+		amps_power(true);
+}
+
+static void amp_rescue_fn(struct work_struct *work)
+{
+	amps_rescue();
+}
+
+static int amp_rescue_set(const char *arg, const struct kernel_param *kp)
+{
+	if (!bb_added)
+		return -ENODEV;
+	amps_rescue();
+	return 0;
+}
+static const struct kernel_param_ops amp_rescue_ops = { .set = amp_rescue_set };
+module_param_cb(amp_rescue, &amp_rescue_ops, NULL, 0200);
+MODULE_PARM_DESC(amp_rescue, "write 1: set the amps up again now (as after a resume)");
+
+static int abox_pm_notify(struct notifier_block *nb, unsigned long event, void *unused)
+{
+	if (event == PM_POST_SUSPEND)
+		schedule_work(&amp_rescue_work);
+	return NOTIFY_DONE;
+}
+static struct notifier_block abox_pm_nb = { .notifier_call = abox_pm_notify };
 
 /* ---- ALSA ------------------------------------------------------------------ */
 
@@ -1769,6 +2697,7 @@ static int abox_pcm_open(struct snd_pcm_substream *s)
 static int abox_pcm_close(struct snd_pcm_substream *s)
 {
 	WRITE_ONCE(active, NULL);
+	WRITE_ONCE(last_sound, jiffies);
 	WRITE_ONCE(ap_open, false);
 	cancel_work_sync(&amp_on_work);
 	if (!READ_ONCE(call_on)) {
@@ -1837,6 +2766,7 @@ static int abox_pcm_trigger(struct snd_pcm_substream *s, int cmd)
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		WRITE_ONCE(ap_run, true);
+		WRITE_ONCE(last_sound, jiffies);
 		uaif_on();
 		HW0(PCM_PLTDAI_TRIGGER, 1, 0, 0);
 		if (graph)
@@ -2539,11 +3469,17 @@ static void teardown(void)
 
 	if (card)
 		snd_card_free(card);
+	if (pm_nb_added)
+		unregister_pm_notifier(&abox_pm_nb);
+	cancel_work_sync(&amp_rescue_work);
+	cancel_delayed_work_sync(&dsp_load_work);
+	cancel_delayed_work_sync(&dsp_reinit_work);
 	cancel_work_sync(&amp_on_work);
 	cancel_work_sync(&gear_work);
 	cancel_work_sync(&rt_lead_work);
 	for (i = 0; i < ARRAY_SIZE(amps); i++) {
 		amp_power(&amps[i], false);
+		spk_forget(&amps[i]);
 		if (amps[i].regmap)
 			regmap_exit(amps[i].regmap);
 		if (amps[i].client)
@@ -2846,6 +3782,9 @@ static int __init abox_init(void)
 
 	INIT_WORK(&gear_work, gear_tell);
 	INIT_WORK(&amp_on_work, amp_on_fn);
+	INIT_WORK(&amp_rescue_work, amp_rescue_fn);
+	INIT_DELAYED_WORK(&dsp_load_work, dsp_load_fn);
+	INIT_DELAYED_WORK(&dsp_reinit_work, dsp_reinit_fn);
 	pdev = platform_device_register_simple("snd-zrn-abox-bx", -1, NULL, 0);
 	if (IS_ERR(pdev))
 		return PTR_ERR(pdev);
@@ -2910,6 +3849,10 @@ static int __init abox_init(void)
 		ret = snd_card_register(card);
 	if (ret)
 		goto err;
+	pm_nb_added = !register_pm_notifier(&abox_pm_nb);
+	dsp_state_update();
+	if (amp_dsp)
+		dsp_load_later(0);
 	return 0;
 
 err:

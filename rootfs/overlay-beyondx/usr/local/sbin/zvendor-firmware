@@ -6,6 +6,8 @@
 # with noload (no ext4 journal replay), or used where zmodem already has it.
 # Runs before Wi-Fi, sound and the modem; does nothing once all are there.
 # Added for OmonullOS, November 2026.
+# Modified for OmonullOS, November 2026: the amps' speaker protection firmware
+# and tuning (snd-zrn-abox-bx amp_dsp, docs/s10-5g/SPK-PROT.md).
 set -u
 F=${ZVF_DEST:-/usr/lib/firmware}	# another place only to try it out
 V=/mnt/vendor
@@ -24,6 +26,12 @@ SoundBoosterParam.bin SoundBoosterParam.bin
 rxse.bin rxse.bin
 txse1.bin txse1.bin
 txse2.bin txse2.bin
+cs35l40-bot-dsp1-spk-prot.wmfw cs35l40-bot-dsp1-spk-prot.wmfw
+cs35l40-bot-dsp1-spk-prot.bin cs35l40-bot-dsp1-spk-prot.bin
+cs35l40-rcv-dsp1-spk-prot.wmfw cs35l40-rcv-dsp1-spk-prot.wmfw
+cs35l40-rcv-dsp1-spk-prot.bin cs35l40-rcv-dsp1-spk-prot.bin
+cs35l40-bot-dsp1-spk-prot-calib.bin cs35l40-bot-dsp1-spk-prot-calib.bin
+cs35l40-rcv-dsp1-spk-prot-calib.bin cs35l40-rcv-dsp1-spk-prot-calib.bin
 "
 log() { echo "zvendor-firmware: $*"; echo "zboot| vendor-firmware: $*" 2>/dev/null > /dev/kmsg; }
 

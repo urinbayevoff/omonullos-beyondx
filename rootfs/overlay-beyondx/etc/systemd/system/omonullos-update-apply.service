@@ -1,0 +1,8 @@
+[Unit]
+Description=omonullOS: install the update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/omonullos-update apply

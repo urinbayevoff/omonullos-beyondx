@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* Cairo supplies immutable page pictures. GLES moves and composites them;
- * no frame readback, software perspective slicing, or per-frame page upload. */
+ * no frame readback, software perspective slicing, or per-frame page upload.
+ *
+ * Modified for OmonullOS, November 2026: pictures drawn in the last frame or
+ * two are not evicted for another (a long page was uploaded every frame). */
 #define _POSIX_C_SOURCE 200809L
 #include "zrnmetrogpu.h"
 #include "zrnmetrorender.h"
@@ -21,6 +24,7 @@ bool zmc_perflog(void);	/* zrnmetrocore.c */
 #define TEXTURES 6
 #define TILE_HEIGHT 2048
 #define CACHE_BYTES (64u * 1024u * 1024u)
+#define RECENT_USES 4	/* pictures drawn this recently are kept over the budget */
 struct picture {
 	cairo_surface_t *source; /* retain it: an address cannot be recycled under a texture */
 	unsigned revision, used;
@@ -269,6 +273,11 @@ static struct picture *picture(cairo_surface_t *source, unsigned revision) {
 			if (q != p && q->source && (!victim || q->used < victim->used)) victim = q;
 		}
 		if (!victim) return NULL;
+		/* OmonullOS: never the ones drawn in the last frame or two. A page
+		 * over the budget (a long conversation, 1440x14200) was put out for
+		 * the small strip drawn over it and uploaded again every frame: 90 ms
+		 * a frame while it scrolled. Over the budget is better than that. */
+		if (victim->used + RECENT_USES > gpu.clock) break;
 		retained -= (size_t)victim->w * victim->h * 4;
 		forget(victim);
 	}

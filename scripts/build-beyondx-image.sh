@@ -231,6 +231,29 @@ install -m644 "$SRC"/os/fonts/selawik/*.ttf "$R/usr/local/share/fonts/selawik/"
 rm -rf "$R/usr/local/lib/ztos-sdk"
 cp -a --no-preserve=ownership "$SRC/sdk" "$R/usr/local/lib/ztos-sdk"
 ln -sf ../lib/ztos-sdk/bin/ztos-sdk "$R/usr/local/bin/ztos-sdk"
+# the system's own SDK apps (Updates): built here with the SDK, installed for
+# everyone below /usr/local, so omonullos-update can update them too
+for app in updates; do
+	rm -rf "$WORK/app-$app"
+	cp -a "$SRC/os/apps/$app" "$WORK/app-$app"
+	(cd "$WORK/app-$app" && python3 "$SRC/sdk/bin/ztos-sdk" build) >/dev/null || die "cannot build app $app"
+	id=$(sed -n 's/^id = "\(.*\)"/\1/p' "$WORK/app-$app/ztos.toml")
+	name=$(sed -n 's/^name = "\(.*\)"/\1/p' "$WORK/app-$app/ztos.toml")
+	install -Dm755 "$WORK/app-$app/dist/$id" "$R/usr/local/lib/omonullos/apps/$id"
+	install -Dm644 "$WORK/app-$app/icon.svg" "$R/usr/local/share/icons/hicolor/scalable/apps/$id.svg"
+	install -Dm644 /dev/stdin "$R/usr/local/share/applications/$id.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=$name
+Exec=/usr/local/lib/omonullos/apps/$id
+Icon=$id
+Terminal=false
+StartupWMClass=ztos.$id
+Categories=System;
+X-ZtOS-Id=$id
+DESKTOP
+	rm -rf "$WORK/app-$app"
+done
 
 if [ -n "$EXTRA" ]; then
 	say "kernel-job files"
@@ -298,6 +321,15 @@ want multi-user.target zboot-firstboot zboot-usb-gadget zbattlog zcpu zgpu zlowb
 want sysinit.target zvendor-firmware zboot-guards zclock zlastlog
 want graphical.target zrn-cpuidle
 want poweroff.target zchgoff
+# omonullOS updates (omonullos-update): a look once a day, and the keys that
+# may sign them (public halves only; the private key is with the owner)
+mkdir -p "$S/timers.target.wants"
+ln -sf /etc/systemd/system/omonullos-update-check.timer "$S/timers.target.wants/omonullos-update-check.timer"
+if ls "$SRC"/image/beyondx/ota-keys/*.pem >/dev/null 2>&1; then
+	install -Dm644 -t "$R/usr/local/share/omonullos/ota-keys" "$SRC"/image/beyondx/ota-keys/*.pem
+else
+	echo "warning: no image/beyondx/ota-keys/*.pem: this image cannot take updates" >&2
+fi
 mkdir -p "$S/getty.target.wants"
 ln -sf /usr/lib/systemd/system/serial-getty@.service "$S/getty.target.wants/serial-getty@ttyGS0.service"
 # no suspend through systemd (the phone's own sleep work is not a service yet)
@@ -323,6 +355,18 @@ rm -rf "$R/var/log/pacman.log" "$R"/root/.bash_history "$R"/etc/ssh/ssh_host_*
 	echo "commit $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 	[ -z "$missing" ] || echo "MISSING:$missing"
 } > "$R/etc/omonullos-build"
+# the update made from this very root (OTA_VERSION/OTA_TAG/OTA_NOTES from the
+# CI on a tag; OTA_BASE = the previous release's manifest, for a delta): the
+# image then knows its version and which /etc files are still ours
+if [ -n "${OTA_VERSION:-}" ]; then
+	say "update package $OTA_VERSION"
+	rm -rf "$(dirname "$OUT")/ota"
+	python3 "$SRC/scripts/ota-make-package.py" --root "$R" --version "$OTA_VERSION" \
+		--tag "${OTA_TAG:-beyondx-v$OTA_VERSION}" --notes "${OTA_NOTES:?OTA_NOTES}" \
+		--commit "$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)" \
+		--out "$(dirname "$OUT")/ota" ${OTA_BASE:+--base "$OTA_BASE"}
+	install -Dm644 "$(dirname "$OUT")/ota/installed.json" "$R/var/lib/omonullos-update/installed.json"
+fi
 cleanup
 trap - EXIT
 

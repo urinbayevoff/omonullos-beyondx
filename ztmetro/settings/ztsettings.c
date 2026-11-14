@@ -16,6 +16,8 @@
  * Modified for OmonullOS, November 2026: the theme page installs the user's own Segoe UI Symbol.
  * Modified for OmonullOS, November 2026: the theme page downloads ztOS's Segoe fonts and Apple Color Emoji.
  * Modified for OmonullOS, November 2026: the navigation page picks buttons or the iPhone-like line.
+ * Modified for OmonullOS, November 2026: ztOS's wallpapers download in the background with a
+ *   progress bar in the accent colour (size, speed, time left), found again when reopened.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -537,7 +539,8 @@ static struct font_job media_job = {
  * (11 series of 16) from Commons and crop them on the phone. It leaves a
  * mark when done. Only where the helper is installed. */
 static bool commons_available(void) {
-	return access("/usr/local/bin/zcommons-walls", X_OK) == 0;
+	/* or a status file given for --render (ZTSETTINGS_COMMONS_STATUS) */
+	return access("/usr/local/bin/zcommons-walls", X_OK) == 0 || getenv("ZTSETTINGS_COMMONS_STATUS");
 }
 
 static bool commons_installed(void) {
@@ -550,6 +553,166 @@ static struct font_job commons_job = {
 	"Installed. The new wallpapers are in the list now.", commons_note, sizeof(commons_note),
 	NULL, "", 0,
 };
+/* OmonullOS, November 2026: the downloads run in their services whether
+ * Settings is open or not; the fetch scripts write how far they are into
+ * their status file once a second ("progress DONE TOTAL", in bytes for
+ * ztos-media, "progress DONE TOTAL files" for the Commons wallpapers, then
+ * "unpack", "ok" or "error: ..."). The theme page shows it as a bar in the
+ * accent colour with the size, the speed and the time left, and finds a
+ * download already under way when it is opened again. */
+struct dl_progress {
+	const char *status, *env;	/* the status file; another one for --render */
+	struct font_job *job;
+	bool (*installed)(void);
+	const char *done_text;
+	bool running, unpacking, files;
+	double done, total;	/* bytes, or files */
+	double speed;		/* a second, smoothed */
+	double last_done;
+	uint32_t last_ms;
+};
+static struct dl_progress media_dl = {
+	"/run/ztos-media.status", "ZTSETTINGS_MEDIA_STATUS", &media_job, media_installed,
+	"Installed. The new wallpapers and ringtones are in the lists now.",
+};
+static struct dl_progress commons_dl = {
+	"/run/zcommons-walls.status", "ZTSETTINGS_COMMONS_STATUS", &commons_job, commons_installed,
+	"Installed. The new wallpapers are in the list now.",
+};
+
+/* read the status file; whether a download is under way */
+static bool dl_read(struct dl_progress *p) {
+	char line[160] = "", unit[16] = "";
+	struct stat st;
+	const char *path = getenv(p->env) ? getenv(p->env) : p->status;
+	FILE *f = fopen(path, "r");
+	if (!f || stat(path, &st) < 0) {
+		if (f) fclose(f);
+		p->running = p->unpacking = false;
+		return p->job->pipe != NULL;
+	}
+	if (!fgets(line, sizeof(line), f)) line[0] = 0;
+	fclose(f);
+	/* a fetch that died leaves its last line behind: once a second, or stale */
+	bool fresh = time(NULL) - st.st_mtime < 30;
+	double d, t;
+	p->unpacking = false;
+	int n = sscanf(line, "progress %lf %lf %15s", &d, &t, unit);
+	if (n >= 2 && fresh) {
+		uint32_t now = zmc_now_ms();
+		if (p->last_ms && d > p->last_done && now > p->last_ms) {
+			double inst = (d - p->last_done) * 1000.0 / (now - p->last_ms);
+			p->speed = p->speed > 0 ? p->speed * 0.7 + inst * 0.3 : inst;
+		}
+		if (d != p->last_done || !p->last_ms) { p->last_done = d; p->last_ms = now; }
+		p->done = d;
+		p->total = t;
+		p->files = n == 3 && !strcmp(unit, "files");
+		p->running = true;
+	} else if (!strncmp(line, "unpack", 6) && fresh) {
+		p->running = p->unpacking = true;
+		p->done = p->total;
+	} else if (!strncmp(line, "busy", 4) && fresh) {
+		p->running = true;
+	} else {
+		p->running = false;
+	}
+	return p->running || p->job->pipe != NULL;
+}
+
+/* one timer for both: it stops when neither is under way */
+static bool dl_tick_one(struct dl_progress *p) {
+	bool was = p->running;
+	bool on = dl_read(p);
+	if (!on) {
+		/* finished while Settings was not waiting on it (opened again) */
+		if (was && !p->job->pipe && !p->job->note[0]) {
+			snprintf(p->job->note, p->job->note_size, "%s", p->installed() ?
+				ZT_(p->done_text) : ZT_("The download stopped. Check the internet and try again."));
+		}
+		p->last_ms = 0;
+		p->speed = 0;
+	}
+	return on;
+}
+
+static void media_tick(void) {
+	if (zmc.page != PAGE_THEME) {	/* only that page shows it; arrived() starts it again */
+		zmc_every(0, NULL);
+		return;
+	}
+	bool a = dl_tick_one(&media_dl);
+	bool b = dl_tick_one(&commons_dl);
+	if (!a && !b) zmc_every(0, NULL);
+	zmc_redraw();
+}
+
+static void media_watch(void) {
+	bool a = dl_read(&media_dl);
+	bool b = dl_read(&commons_dl);
+	if (a || b) zmc_every(1000, media_tick);
+}
+
+static void fmt_bytes(char *out, size_t size, double b) {
+	if (b >= 1e6) snprintf(out, size, "%.1f MB", b / 1e6);
+	else snprintf(out, size, "%.0f KB", b / 1e3);
+}
+
+static void fmt_amount(const struct dl_progress *p, char *out, size_t size, double v) {
+	if (p->files) snprintf(out, size, "%.0f", v);
+	else fmt_bytes(out, size, v);
+}
+
+/* the bar and its lines; returns the y below */
+static double dl_draw(cairo_t *cr, const struct dl_progress *p, double y) {
+	double w = zmc.width - 2 * MARGIN;
+	double frac = p->total > 0 ? fmin(1.0, p->done / p->total) : 0;
+	char head[96];
+	if (p->unpacking) {
+		snprintf(head, sizeof(head), "%s", ZT_("Unpacking..."));
+	} else if (p->total > 0) {
+		snprintf(head, sizeof(head), ZT_("Downloading: %d%%"), (int)(frac * 100));
+	} else {
+		snprintf(head, sizeof(head), "%s", ZT_("Starting the download..."));
+	}
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_text(cr, head, FONT_REGULAR, 15, MARGIN, y, w);
+	y += 26;
+	/* the track, and the accent filling it */
+	cairo_set_source_rgb(cr, 0.22, 0.22, 0.22);
+	cairo_rectangle(cr, MARGIN, y, w, 6);
+	cairo_fill(cr);
+	zmc_set_rgb(cr, ACCENTS[app.accent].color);
+	cairo_rectangle(cr, MARGIN, y, p->unpacking ? w : w * frac, 6);
+	cairo_fill(cr);
+	y += 16;
+	if (p->total > 0 && !p->unpacking) {
+		char done[24], total[24], line[160];
+		fmt_amount(p, done, sizeof(done), p->done);
+		fmt_amount(p, total, sizeof(total), p->total);
+		int n = p->files ? snprintf(line, sizeof(line), ZT_("%s of %s wallpapers"), done, total) :
+			snprintf(line, sizeof(line), "%s / %s", done, total);
+		if (p->speed > 0) {
+			if (!p->files) {
+				char sp[24];
+				fmt_bytes(sp, sizeof(sp), p->speed);
+				n += snprintf(line + n, sizeof(line) - (size_t)n, "  ·  %s/s", sp);
+			}
+			double left = (p->total - p->done) / p->speed;
+			if (left >= 90) {
+				snprintf(line + n, sizeof(line) - (size_t)n, ZT_("  ·  about %d min left"), (int)(left / 60 + 0.5));
+			} else if (left >= 1) {
+				snprintf(line + n, sizeof(line) - (size_t)n, ZT_("  ·  about %d s left"), (int)left);
+			}
+		}
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, line, FONT_REGULAR, 12, MARGIN, y, w);
+		y += 20;
+	}
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, "It goes on in the background: you can leave Settings.", FONT_REGULAR, 12, MARGIN, y, w) + 12;
+	return y;
+}
 
 static void symfont_install(void) {
 	const char *home = getenv("HOME"), *user = getenv("USER");
@@ -2116,7 +2279,10 @@ static double draw_theme(cairo_t *cr) {
 	y = draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
 
 	/* OmonullOS: the rest of the Commons wallpapers, downloaded on request */
-	if (commons_available() && (!commons_installed() || commons_note[0])) {
+	bool commons_busy = commons_available() && dl_read(&commons_dl);
+	if (commons_busy) {
+		y = dl_draw(cr, &commons_dl, y) + 12;
+	} else if (commons_available() && (!commons_installed() || commons_note[0])) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 		if (!commons_installed()) {
 			y += zmc_text(cr, "More wallpapers: 176 photos from Wikimedia Commons (Uzbekistan, mountains, "
@@ -2139,7 +2305,10 @@ static double draw_theme(cairo_t *cr) {
 	}
 
 	/* OmonullOS: ztOS's own wallpapers and ringtones, downloaded on request */
-	if (!media_installed() || media_note[0]) {
+	bool media_busy = dl_read(&media_dl);
+	if (media_busy) {
+		y = dl_draw(cr, &media_dl, y) + 12;
+	} else if (!media_installed() || media_note[0]) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 		if (!media_installed()) {
 			y += zmc_text(cr, "ztOS's Nokia and Lumia wallpapers and Windows Phone ringtones are Microsoft's "
@@ -3729,11 +3898,15 @@ static void activate(int action, int arg) {
 		zmc_redraw();
 		break;
 	case ACT_COMMONS_DOWNLOAD:
+		commons_note[0] = 0;
 		font_job_start(&commons_job);
+		media_watch();
 		zmc_redraw();
 		break;
 	case ACT_MEDIA_DOWNLOAD:
+		media_note[0] = 0;
 		font_job_start(&media_job);
+		media_watch();
 		zmc_redraw();
 		break;
 	case ACT_SYMFONT:
@@ -4556,6 +4729,8 @@ static void arrived(int page) {
 	} else if (page == PAGE_DISPLAY) {
 		display_tick();
 		zmc_every(700, display_tick);
+	} else if (page == PAGE_THEME) {
+		media_watch();	/* a download under way, started now or before */
 	}
 }
 

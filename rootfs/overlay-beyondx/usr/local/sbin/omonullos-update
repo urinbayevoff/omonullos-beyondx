@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""omonullos-update: OmonullOS's own updates (run as root, by its services).
+
+Arch's packages are ztos-update's business (pacman). This one updates what
+OmonullOS itself puts on the phone and pacman does not know about: ztMETRO,
+the apps, the z* helpers, the scripts and the overlay files.
+
+    omonullos-update check [--quiet]   is there a newer signed release?
+    omonullos-update apply             download, verify and install it
+    omonullos-update rollback          put back what the last update replaced
+    omonullos-update status            print the state (for people)
+
+A release has three files: manifest.json (version, what is new, every file with
+its sha256), manifest.json.sig (ed25519 over the exact manifest bytes, made with
+a key that lives only with the owner, never on GitHub) and the package (a
+tar.zst of the files). Nothing is used before the signature is good, and every
+file is checked against the manifest before it is installed.
+
+Stage 1 writes only below ALLOWED (user space). The kernel, modules, BOOT and
+firmware are never touched: a manifest that needs those says so with
+"min_updater" and this version refuses it ("update the updater first").
+
+State for the Updates app:
+    /run/omonullos-update/status.json   {"state": ..., "k": .., "n": .., "msg": ..}
+    /var/lib/omonullos-update/available.json   the verified manifest on offer
+    /var/lib/omonullos-update/installed.json   the manifest now installed
+    /var/lib/omonullos-update/backup/<version>/ what the last update replaced
+
+Added for OmonullOS, November 2026.
+"""
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+
+UPDATER_VERSION = 1        # what this updater can install (manifest "min_updater")
+DEVICE = "beyondx"
+
+ROOT = os.environ.get("OMONULLOS_UPDATE_ROOT", "/").rstrip("/") or "/"
+CONF = os.environ.get("OMONULLOS_UPDATE_CONF", "/etc/omonullos-update.conf")
+RUN = os.environ.get("OMONULLOS_UPDATE_RUN", "/run/omonullos-update")
+VAR = os.environ.get("OMONULLOS_UPDATE_VAR", "/var/lib/omonullos-update")
+LOG = os.environ.get("OMONULLOS_UPDATE_LOG", "/var/log/omonullos-update.log")
+KEYS = "/usr/local/share/omonullos/ota-keys"     # *.pem, any one may sign
+
+# where an update may write (relative to /), and what it never may
+ALLOWED = ("usr/local/bin/", "usr/local/sbin/", "usr/local/share/", "usr/local/lib/ztos-sdk/",
+           "usr/local/lib/omonullos/", "etc/")
+DENIED = ("usr/local/bin/busybox-zboot", "usr/local/share/omonullos/ota-keys/",
+          "etc/shadow", "etc/gshadow", "etc/passwd", "etc/group", "etc/sudoers",
+          "etc/polkit-1/", "etc/fstab", "etc/ssh/ssh_host_", "etc/machine-id",
+          "etc/modprobe.d/", "etc/omonullos-update.conf")
+KEEP_BACKUPS = 2
+AFTER_TEXT = {"reboot": " Telefonni qayta yoqing.", "restart-shell": " Telefonni qayta yoqing."}
+
+
+# ---------------------------------------------------------------- small things
+
+def log(*words):
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + " ".join(str(w) for w in words)
+    print(line, file=sys.stderr)
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def status(state, **more):
+    os.makedirs(RUN, exist_ok=True)
+    more["state"] = state
+    more["time"] = int(time.time())
+    write_json(os.path.join(RUN, "status.json"), more)
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def version_key(v):
+    out = []
+    for part in str(v).lstrip("v").split("."):
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
+def tell(title, text):
+    """A notification for whoever is at the phone (ztMETRO's control FIFO)."""
+    if ROOT != "/":
+        return
+    base = "/run/user"
+    try:
+        users = os.listdir(base)
+    except OSError:
+        return
+    for u in users:
+        ctl = os.path.join(base, u, "ztmetro.ctl")
+        try:
+            fd = os.open(ctl, os.O_WRONLY | os.O_NONBLOCK)   # no reader: fails, never blocks
+        except OSError:
+            continue
+        try:
+            os.write(fd, f"notify Yangilanişlar|{title}|{text}\n".encode())
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+def config():
+    conf = {"source": "github:urinbayevoff/omonullos-beyondx", "channel": "stable"}
+    try:
+        with open(CONF) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    conf[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return conf
+
+
+def under_root(rel):
+    return os.path.join(ROOT, rel) if ROOT != "/" else "/" + rel
+
+
+# ---------------------------------------------------------------- paths
+
+def check_path(rel):
+    """A manifest path is usable only if it is plain, relative and allowed."""
+    if not isinstance(rel, str) or not rel or rel.startswith("/") or "\\" in rel or "\0" in rel:
+        raise ValueError(f"bad path {rel!r}")
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"bad path {rel!r}")
+    if not rel.startswith(ALLOWED):
+        raise ValueError(f"not allowed: {rel}")
+    for d in DENIED:
+        if rel == d.rstrip("/") or rel.startswith(d):
+            raise ValueError(f"denied: {rel}")
+    return rel
+
+
+def check_parent(rel):
+    """The same check as safe_parent, creating nothing: done for every file
+    before the first one is written."""
+    cur = os.path.realpath(ROOT)
+    for part in rel.split("/")[:-1]:
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            raise ValueError(f"symlink on the way: {cur}")
+        if not os.path.exists(cur):
+            return
+        if not os.path.isdir(cur):
+            raise ValueError(f"not a directory: {cur}")
+
+
+def safe_parent(rel):
+    """Make the directories for rel; refuse to go through a symlink (an update
+    must not be able to write outside the allowed places that way)."""
+    real_root = os.path.realpath(ROOT)
+    cur = real_root
+    for part in rel.split("/")[:-1]:
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            # the system's own /usr/sbin -> bin style links are not ours to follow
+            raise ValueError(f"symlink on the way: {cur}")
+        if not os.path.exists(cur):
+            os.mkdir(cur, 0o755)
+        elif not os.path.isdir(cur):
+            raise ValueError(f"not a directory: {cur}")
+    return cur
+
+
+# ---------------------------------------------------------------- the release
+
+def fetch(url, dest=None, limit=64 << 20):
+    req = urllib.request.Request(url, headers={"User-Agent": "omonullos-update",
+                                               "Accept": "application/octet-stream"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        if dest is None:
+            data = r.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError(f"too big: {url}")
+            return data
+        n = 0
+        with open(dest, "wb") as f:
+            for block in iter(lambda: r.read(1 << 16), b""):
+                n += len(block)
+                if n > limit:
+                    raise ValueError(f"too big: {url}")
+                f.write(block)
+        return dest
+
+
+def releases(conf):
+    """[(tag, {asset name: url})] newest first, from the configured source:
+    github:OWNER/REPO, or dir:/path (one subdirectory per release, for tests)."""
+    src = conf["source"]
+    if src.startswith("dir:"):
+        base = src[4:]
+        out = []
+        for tag in sorted(os.listdir(base), reverse=True):
+            d = os.path.join(base, tag)
+            if os.path.isdir(d):
+                out.append((tag, {n: "file://" + os.path.join(d, n) for n in os.listdir(d)}))
+        return out
+    if src.startswith("github:"):
+        repo = src[7:]
+        data = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=15", limit=4 << 20))
+        # drafts are not offered (a release is a draft until the owner signs
+        # it); pre-releases are: beyondx is all beta for now
+        return [(r["tag_name"], {a["name"]: a["browser_download_url"] for a in r.get("assets", [])})
+                for r in data if not r.get("draft")]
+    raise ValueError(f"unknown source {src}")
+
+
+def verify_sig(manifest_path, sig_path):
+    """True if any key in KEYS signed these exact bytes."""
+    keys_dir = under_root(KEYS.lstrip("/")) if ROOT != "/" else KEYS
+    try:
+        keys = sorted(k for k in os.listdir(keys_dir) if k.endswith(".pem"))
+    except OSError:
+        keys = []
+    if not keys:
+        raise RuntimeError(f"no signing keys in {keys_dir}")
+    for k in keys:
+        r = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", os.path.join(keys_dir, k),
+                            "-rawin", "-in", manifest_path, "-sigfile", sig_path],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if r.returncode == 0:
+            return k
+    return None
+
+
+def check_manifest(m):
+    if not isinstance(m, dict) or m.get("format") != 1:
+        raise ValueError("unknown manifest format")
+    if m.get("device") != DEVICE:
+        raise ValueError(f"for another device: {m.get('device')}")
+    for key in ("version", "package", "files"):
+        if key not in m:
+            raise ValueError(f"manifest has no {key}")
+    for pkg in (m["package"], m.get("delta")):
+        if pkg is None and m.get("delta") is None:
+            continue
+        if not isinstance(pkg, dict) or "/" in str(pkg.get("name", "/")) or \
+                str(pkg.get("name")) in ("manifest.json", "manifest.json.sig") or len(str(pkg.get("sha256", ""))) != 64:
+            raise ValueError("bad package entry")
+    for e in m["files"]:
+        check_path(e["path"])
+        kind = e.get("type", "file")
+        if kind == "file" and len(str(e.get("sha256", ""))) != 64:
+            raise ValueError(f"no sha256 for {e['path']}")
+        if kind == "link" and (not isinstance(e.get("target"), str) or not e["target"] or "\0" in e["target"]):
+            raise ValueError(f"bad link {e['path']}")
+        if kind not in ("file", "link"):
+            raise ValueError(f"unknown entry type {kind}")
+    for rel in m.get("remove", []):
+        check_path(rel)
+
+
+def installed():
+    return read_json(os.path.join(VAR, "installed.json")) or {"version": "0", "files": []}
+
+
+def find_update(conf, work):
+    """The newest release newer than what is installed whose manifest is signed
+    and meant for this phone: (manifest, assets) or (None, why)."""
+    have = installed()
+    why = "uptodate"
+    for tag, assets in sorted(releases(conf), key=lambda r: version_key(r[0].rsplit("-v", 1)[-1]), reverse=True):
+        if "manifest.json" not in assets or "manifest.json.sig" not in assets:
+            continue
+        mp = os.path.join(work, "manifest.json")
+        sp = os.path.join(work, "manifest.json.sig")
+        fetch(assets["manifest.json"], mp, limit=8 << 20)
+        fetch(assets["manifest.json.sig"], sp, limit=4096)
+        key = verify_sig(mp, sp)
+        if not key:
+            log("release", tag, ": signature NOT good, skipped")
+            why = "badsig"
+            continue
+        m = read_json(mp)
+        try:
+            check_manifest(m)
+        except (ValueError, KeyError, TypeError) as e:
+            log("release", tag, ": manifest refused:", e)
+            why = "refused"
+            continue
+        if version_key(m["version"]) <= version_key(have.get("version", "0")):
+            return None, why if why != "uptodate" else "uptodate"
+        if int(m.get("min_updater", 1)) > UPDATER_VERSION:
+            m["_needs_updater"] = True
+        m["_tag"] = tag
+        m["_key"] = key
+        m["_assets"] = assets
+        with open(mp, "rb") as f:
+            m["_manifest_sha256"] = hashlib.sha256(f.read()).hexdigest()
+        return m, "available"
+    return None, why
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_check(quiet=False):
+    status("checking")
+    log("== check")
+    with tempfile.TemporaryDirectory(prefix="omonullos-update.") as work:
+        try:
+            m, why = find_update(config(), work)
+        except Exception as e:  # network, GitHub, keys
+            log("check failed:", repr(e))
+            status("failed", msg=f"check: {e}")
+            return 1
+        avail = os.path.join(VAR, "available.json")
+        if m is None:
+            if os.path.exists(avail):
+                os.remove(avail)
+            status(why, version=installed().get("version", "0"))
+            log("check:", why)
+            return 0
+        write_json(avail, m)
+        if m.get("_needs_updater"):
+            status("needs-updater", version=m["version"])
+        else:
+            status("available", version=m["version"])
+        log("check: available", m["version"], "signed by", m["_key"])
+        if not quiet:
+            tell("omonullOS " + m["version"], "Yangi versiya bor. Yangilanişlar ilovasini oçing.")
+        return 0
+
+
+def cmd_apply():
+    avail = read_json(os.path.join(VAR, "available.json"))
+    if not avail:
+        status("failed", msg="nothing to install (check first)")
+        return 1
+    if avail.get("_needs_updater"):
+        status("needs-updater", version=avail["version"])
+        return 1
+    have = installed()
+    old_files = {e["path"]: e for e in have.get("files", [])}
+    log("== apply", have.get("version"), "->", avail["version"])
+    os.makedirs(VAR, exist_ok=True)
+    work = tempfile.mkdtemp(prefix="apply.", dir=VAR)
+    try:
+        # 1. the manifest again, and its signature again: available.json is only
+        #    a note for the app, the files are trusted from what is signed now
+        status("downloading", version=avail["version"])
+        assets = avail["_assets"]
+        mp, sp = os.path.join(work, "manifest.json"), os.path.join(work, "manifest.json.sig")
+        fetch(assets["manifest.json"], mp, limit=8 << 20)
+        fetch(assets["manifest.json.sig"], sp, limit=4096)
+        if not verify_sig(mp, sp):
+            raise RuntimeError("signature not good")
+        m = read_json(mp)
+        check_manifest(m)
+        if m["version"] != avail["version"]:
+            raise RuntimeError("the release changed since the check; check again")
+        if int(m.get("min_updater", 1)) > UPDATER_VERSION:
+            raise RuntimeError("needs a newer updater")
+
+        # 2. the package: the delta from the installed version if there is
+        #    one, else the full one; its sha256, then every file in it
+        pkg, delta = m["package"], m.get("delta")
+        if delta and str(delta.get("base")) == str(have.get("version")) and delta["name"] in assets:
+            pkg = delta
+        elif pkg["name"] not in assets:
+            raise RuntimeError("the release has no " + pkg["name"])
+        log("apply: package", pkg["name"], pkg.get("size"), "bytes")
+        pp = os.path.join(work, pkg["name"])
+        fetch(assets[pkg["name"]], pp, limit=int(pkg.get("size", 512 << 20)) + 1)
+        if sha256_file(pp) != pkg["sha256"]:
+            raise RuntimeError("package sha256 does not match")
+        status("verifying", version=m["version"])
+        stage = os.path.join(work, "stage")
+        os.mkdir(stage)
+        with tarfile.open(pp, "r:*") as t:
+            t.extractall(stage, filter="data")
+        need = 0
+        todo = []
+        for e in m["files"]:
+            src = os.path.join(stage, e["path"])
+            if not os.path.lexists(src):
+                if pkg is m["package"]:
+                    raise RuntimeError("the package has no " + e["path"])
+                continue  # a delta: unchanged since the base, nothing to do
+            if e.get("type", "file") == "link":
+                if not os.path.islink(src) or os.readlink(src) != e["target"]:
+                    raise RuntimeError("link differs: " + e["path"])
+            elif os.path.islink(src) or not os.path.isfile(src) or sha256_file(src) != e["sha256"]:
+                raise RuntimeError("file differs from the manifest: " + e["path"])
+            else:
+                need += os.path.getsize(src)
+            check_parent(e["path"])   # before anything is written: no symlink on the way
+            todo.append(e)
+        free = shutil.disk_usage(ROOT).free
+        if free < 2 * need + (64 << 20):
+            raise RuntimeError(f"not enough space: {free >> 20} MB free, {need >> 20} MB needed")
+
+        # 3. back up and install, one file at a time, each by rename; the
+        #    journal is on disk before each change, so a rollback (or the undo
+        #    below, if something fails half way) knows exactly what to put back
+        bdir = os.path.join(VAR, "backup", str(have.get("version", "0")))
+        if os.path.exists(bdir):
+            shutil.rmtree(bdir)
+        os.makedirs(os.path.join(bdir, "files"))
+        write_json(os.path.join(bdir, "from.json"), have)
+        journal = {"from_version": have.get("version", "0"), "to_version": m["version"], "replaced": [],
+                   "created": [], "kept": [], "removed": [], "done": False, "time": int(time.time()),
+                   "after": m.get("after", "reboot")}
+        jpath = os.path.join(bdir, "journal.json")
+        write_json(jpath, journal)
+        try:
+            n = len(todo)
+            for k, e in enumerate(todo, 1):
+                status("installing", version=m["version"], k=k, n=n, name=e["path"].rsplit("/", 1)[-1])
+                install_one(e, stage, bdir, old_files.get(e["path"]), journal, jpath)
+            for rel in m.get("remove", []):
+                remove_one(rel, bdir, old_files.get(rel), journal, jpath)
+            os.sync()
+            new = {k: v for k, v in m.items() if not k.startswith("_")}
+            new["installed_at"] = int(time.time())
+            write_json(os.path.join(VAR, "installed.json"), new)
+            journal["done"] = True
+            write_json(jpath, journal)
+        except Exception:
+            log("apply: failed half way, putting back what was changed")
+            undo(bdir, journal)
+            raise
+        try:
+            os.remove(os.path.join(VAR, "available.json"))
+        except OSError:
+            pass
+        prune_backups(keep=str(have.get("version", "0")))
+        status("done", version=m["version"], after=m.get("after", "reboot"), kept=journal["kept"])
+        log("apply: done", m["version"], "replaced", len(journal["replaced"]), "created",
+            len(journal["created"]), "kept (yours, .new written)", journal["kept"])
+        tell("omonullOS " + m["version"], "Örnatildi." + AFTER_TEXT.get(m.get("after", "reboot"), ""))
+        return 0
+    except Exception as e:
+        log("apply failed:", repr(e))
+        status("failed", msg=str(e))
+        tell("Yangilanmadi", str(e)[:120])
+        return 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def backup(rel, bdir):
+    dst = os.path.join(bdir, "files", rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    src = under_root(rel)
+    if os.path.islink(src):
+        os.symlink(os.readlink(src), dst)
+    else:
+        shutil.copy2(src, dst)
+
+
+def put(src, dest, mode):
+    """Copy src to dest by a temp file in the same directory and a rename: a
+    running program keeps its old file, nothing is ever half written."""
+    tmp = dest + ".omonullos-new"
+    if os.path.lexists(tmp):
+        os.remove(tmp)
+    with open(src, "rb") as fi, open(tmp, "wb") as fo:
+        shutil.copyfileobj(fi, fo, 1 << 20)
+        os.fchmod(fo.fileno(), mode)
+        fo.flush()
+        os.fsync(fo.fileno())
+    os.replace(tmp, dest)
+
+
+def note(journal, jpath, what, rel):
+    journal[what].append(rel)
+    write_json(jpath, journal)
+
+
+def put_link(target, dest):
+    tmp = dest + ".omonullos-new"
+    if os.path.lexists(tmp):
+        os.remove(tmp)
+    os.symlink(target, tmp)
+    os.replace(tmp, dest)
+
+
+def install_one(e, stage, bdir, old, journal, jpath):
+    rel = check_path(e["path"])
+    safe_parent(rel)
+    dest = under_root(rel)
+    src = os.path.join(stage, rel)
+    exists = os.path.lexists(dest)
+    if exists and os.path.isdir(dest) and not os.path.islink(dest):
+        raise RuntimeError("a directory is in the way: " + rel)
+    if e.get("type", "file") == "link":
+        if exists and os.path.islink(dest) and os.readlink(dest) == e["target"]:
+            return
+        if exists:
+            backup(rel, bdir)
+        note(journal, jpath, "replaced" if exists else "created", rel)
+        put_link(e["target"], dest)
+        return
+    mode = int(str(e.get("mode", "644")), 8) & 0o7777
+    cur = sha256_file(dest) if exists and not os.path.islink(dest) else None
+    if cur == e["sha256"]:
+        if (os.stat(dest).st_mode & 0o7777) != mode:
+            os.chmod(dest, mode)
+        return
+    if exists and rel.startswith("etc/"):
+        # a configuration file: replace it only if it is still ours (what the
+        # last update put there); if the owner changed it, leave theirs alone
+        if old is None or cur != old.get("sha256"):
+            put(src, dest + ".new", mode)
+            note(journal, jpath, "kept", rel)
+            return
+    if exists:
+        backup(rel, bdir)
+    note(journal, jpath, "replaced" if exists else "created", rel)
+    put(src, dest, mode)
+
+
+def remove_one(rel, bdir, old, journal, jpath):
+    dest = under_root(rel)
+    if not os.path.lexists(dest) or os.path.isdir(dest) and not os.path.islink(dest):
+        return
+    if old is None or os.path.islink(dest) or sha256_file(dest) != old.get("sha256"):
+        return  # not what we put there: leave it
+    backup(rel, bdir)
+    note(journal, jpath, "removed", rel)
+    os.remove(dest)
+
+
+def undo(bdir, j):
+    """Put back what journal j changed (newest first). Each step is checked
+    against the backup, so running it twice (a rollback after a power cut in
+    the middle of one) does no harm."""
+    steps = [("back", r) for r in j["replaced"] + j["removed"]] + [("drop", r) for r in j["created"]]
+    for k, (what, rel) in enumerate(steps, 1):
+        status("rolling-back", k=k, n=len(steps), name=rel.rsplit("/", 1)[-1])
+        check_path(rel)
+        dest = under_root(rel)
+        if what == "back":
+            src = os.path.join(bdir, "files", rel)
+            if not os.path.lexists(src):
+                continue  # noted, then failed before the backup was even made
+            safe_parent(rel)
+            if os.path.islink(src):
+                put_link(os.readlink(src), dest)
+            else:
+                put(src, dest, os.stat(src).st_mode & 0o7777)
+        elif os.path.lexists(dest) and not (os.path.isdir(dest) and not os.path.islink(dest)):
+            os.remove(dest)
+    for rel in j["kept"]:
+        try:
+            os.remove(under_root(rel) + ".new")
+        except OSError:
+            pass
+    os.sync()
+    prev = read_json(os.path.join(bdir, "from.json"))
+    if prev is not None:
+        write_json(os.path.join(VAR, "installed.json"), prev)
+
+
+def prune_backups(keep):
+    base = os.path.join(VAR, "backup")
+    try:
+        dirs = sorted(os.listdir(base), key=lambda d: os.path.getmtime(os.path.join(base, d)), reverse=True)
+    except OSError:
+        return
+    for d in dirs[KEEP_BACKUPS:]:
+        if d != keep:
+            shutil.rmtree(os.path.join(base, d), ignore_errors=True)
+
+
+def last_backup():
+    """The backup of the update now installed: finished, or cut short (power
+    lost in the middle of an apply: then it is what a rollback must undo)."""
+    base = os.path.join(VAR, "backup")
+    now = str(installed().get("version", "0"))
+    best = None
+    try:
+        for d in os.listdir(base):
+            j = read_json(os.path.join(base, d, "journal.json"))
+            if not j:
+                continue
+            if (j.get("done") and str(j.get("to_version")) == now) or \
+                    (not j.get("done") and str(j.get("from_version")) == now):
+                if best is None or j["time"] > best[1]["time"]:
+                    best = (os.path.join(base, d), j)
+    except OSError:
+        pass
+    return best
+
+
+def cmd_rollback():
+    b = last_backup()
+    if not b:
+        status("failed", msg="nothing to roll back")
+        return 1
+    bdir, j = b
+    log("== rollback", j["to_version"], "->", j["from_version"], "" if j.get("done") else "(unfinished apply)")
+    try:
+        undo(bdir, j)
+        shutil.rmtree(bdir, ignore_errors=True)
+        status("rolled-back", version=j["from_version"], after=j.get("after", "reboot"))
+        log("rollback: done, now", j["from_version"])
+        tell("omonullOS " + str(j["from_version"]),
+             "Oldingi versiyaga qaytildi." + AFTER_TEXT.get(j.get("after", "reboot"), ""))
+        return 0
+    except Exception as e:
+        log("rollback failed:", repr(e))
+        status("failed", msg="rollback: " + str(e))
+        return 1
+
+
+def cmd_status():
+    have = installed()
+    print("installed:", have.get("version"), have.get("_tag", have.get("tag", "")))
+    s = read_json(os.path.join(RUN, "status.json"))
+    print("status:", json.dumps(s, ensure_ascii=False) if s else "idle")
+    a = read_json(os.path.join(VAR, "available.json"))
+    if a:
+        print("available:", a["version"], "(" + a.get("_tag", "") + ")")
+    b = last_backup()
+    print("rollback to:", b[1]["from_version"] if b else "-")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] not in ("check", "apply", "rollback", "status"):
+        print(__doc__.split("\n\n")[1], file=sys.stderr)
+        return 2
+    if argv[0] == "status":
+        return cmd_status()
+    if ROOT == "/" and os.geteuid() != 0:
+        print("omonullos-update: run as root (the Updates app starts its services)", file=sys.stderr)
+        return 1
+    os.makedirs(RUN, exist_ok=True)
+    os.makedirs(VAR, exist_ok=True)
+    import fcntl
+    lock = open(os.path.join(RUN, "lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("omonullos-update: already running", file=sys.stderr)
+        return 1
+    os.umask(0o022)
+    if argv[0] == "check":
+        return cmd_check(quiet="--quiet" in argv)
+    if argv[0] == "apply":
+        return cmd_apply()
+    return cmd_rollback()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

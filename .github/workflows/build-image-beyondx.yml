@@ -6,7 +6,10 @@ name: Build S10 5G full image
 #                   rild-lite and busybox (scripts/ci-beyondx-extra.sh)
 #   job 2 (rootfs)  scripts/build-beyondx-image.sh --extra <job 1's tree>
 # image/beyondx/ci.env picks the jobs on a push; a tag beyondx-v* builds
-# everything and makes a release. Actions minutes are limited: only the
+# everything and makes a DRAFT release, with the omonullOS update made from
+# the same root (manifest.json, the full package and a delta from the last
+# signed release; image/beyondx/notes/VERSION.txt is what is new). The owner
+# signs and publishes it on the phone: scripts/zota-sign.sh TAG. Actions minutes are limited: only the
 # paths below start it.
 #
 # Added for OmonullOS, November 2026.
@@ -185,6 +188,39 @@ jobs:
           name: extra
           path: out
 
+      - name: Update package inputs (a tag only)
+        if: startsWith(github.ref, 'refs/tags/beyondx-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${GITHUB_REF_NAME#beyondx-v}
+          case "$v" in *[!0-9.]*|'') echo "bad version $v" >&2; exit 2 ;; esac
+          notes=image/beyondx/notes/$v.txt
+          test -s "$notes" || { echo "no $notes (what is new, in Uzbek)" >&2; exit 2; }
+          {
+            echo "OTA_VERSION=$v"
+            echo "OTA_TAG=$GITHUB_REF_NAME"
+            echo "OTA_NOTES=$PWD/$notes"
+          } >> "$GITHUB_ENV"
+          # the delta's base: the newest published release whose manifest the
+          # owner signed (checked here with the keys in the tree)
+          for t in $(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 20 \
+              --json tagName --jq '.[].tagName'); do
+            [ "$t" = "$GITHUB_REF_NAME" ] && continue
+            d=base-$t
+            gh release download "$t" -R "$GITHUB_REPOSITORY" -p manifest.json -p manifest.json.sig -D "$d" \
+              2>/dev/null || continue
+            for k in image/beyondx/ota-keys/*.pem; do
+              if openssl pkeyutl -verify -pubin -inkey "$k" -rawin -in "$d/manifest.json" \
+                  -sigfile "$d/manifest.json.sig" >/dev/null 2>&1; then
+                echo "delta base: $t"
+                echo "OTA_BASE=$PWD/$d/manifest.json" >> "$GITHUB_ENV"
+                break 2
+              fi
+            done
+            echo "$t: manifest signature not good, not a base" >&2
+          done
+
       - name: Root image
         env:
           MODE: ${{ needs.plan.outputs.mode }}
@@ -196,7 +232,8 @@ jobs:
           else
             args+=(--allow-missing)
           fi
-          sudo bash scripts/build-beyondx-image.sh "${args[@]}"
+          sudo --preserve-env=OTA_VERSION,OTA_TAG,OTA_NOTES,OTA_BASE \
+            bash scripts/build-beyondx-image.sh "${args[@]}"
           df -h /
 
       - name: Pack
@@ -217,6 +254,16 @@ jobs:
             out/root.sha256
           retention-days: 14
 
+      - name: Upload the update package
+        if: env.OTA_VERSION != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ota
+          path: |
+            out/ota/manifest.json
+            out/ota/update-*.tar.zst
+          retention-days: 14
+
   release:
     needs: [kernel, rootfs]
     if: startsWith(github.ref, 'refs/tags/beyondx-v')
@@ -233,8 +280,11 @@ jobs:
         run: |
           mkdir rel
           cp dl/boot/*.img dl/boot/*.build-info dl/rootfs/*.img.zst rel/
+          # the update: manifest.json and its packages; the owner adds
+          # manifest.json.sig (scripts/zota-sign.sh), which also publishes the draft
+          cp dl/ota/manifest.json dl/ota/update-*.tar.zst rel/
           (cd rel && sha256sum * > SHA256SUMS && cat SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft \
             --title "OmonullOS beyondx $GITHUB_REF_NAME" \
-            --notes "Galaxy S10 5G (SM-G977N): BOOT image and root filesystem (ext4, label ZR_ARCH, zstd). Firmware is copied from the phone's own VENDOR partition on the first boot. How to install: docs/s10-5g/INSTALL.md. Wipes Android data." \
+            --notes "Galaxy S10 5G (SM-G977N): BOOT image and root filesystem (ext4, label ZR_ARCH, zstd). Firmware is copied from the phone's own VENDOR partition on the first boot. How to install: docs/s10-5g/INSTALL.md. Wipes Android data. Phones already on omonullOS update from the Updates app (manifest.json, signed by the owner)." \
             rel/*

@@ -4,6 +4,8 @@
  * (Wayland EGL/GLES, cached Cairo/Pango pages, touch; no toolkit).
  *
  * Modified for OmonullOS, October 2026: text drawn in the language (ztlang.h).
+ * Modified for OmonullOS, November 2026: zmc_go_end, a page turn that arrives at
+ *   the page's end (a conversation opens on its newest message, not its oldest).
  */
 #define _GNU_SOURCE
 #include <pthread.h>
@@ -781,6 +783,8 @@ static struct {
 	int heads[LIST_HEADS], n_heads;
 } vl;
 static double vl_window = -1;	/* drawing a picture of the page scrolled so far; -1: the cache */
+/* zmc_go_end: how far down the next forward turn arrives (0: the top) */
+static double arrive_end;
 static bool vl_skip;		/* a second pass, for the title only: no rows */
 static double vl_saved[LIST_PAGES];	/* where each list was left, or is to be shown */
 static double vl_mem_top, vl_mem_row;
@@ -2732,6 +2736,8 @@ static void begin_animation_(bool have_from, bool have_to, int target, double ta
 	if (have_to) {
 		/* a long list comes back to where it was left */
 		double arrive = target >= 0 && target < LIST_PAGES && zmc.anim_back ? vl_saved[target] : 0;
+		if (arrive_end > 0 && !zmc.anim_back) arrive = arrive_end;
+		arrive_end = 0;
 		zmc.scroll = arrive;
 		if (arrive != 0 && !(back_surface && back_page == target) && zmg_ready() && have_from) {
 			double next_dx;
@@ -2788,6 +2794,44 @@ static void begin_animation_(bool have_from, bool have_to, int target, double ta
 	} else {
 		zmc_redraw();
 	}
+}
+
+/* How tall `page` is, drawn once into nothing (the hits put back after). */
+static double page_measure(int page) {
+	static struct zmc_hit saved[MAX_HITS];
+	int n = zmc.n_hits;
+	memcpy(saved, zmc.hits, sizeof(saved[0]) * (size_t)n);
+	bool set = zmc.pivot_set;
+	int other = zmc.pivot_page;
+	double next_dx = zmc.pivot_next_dx;
+	zmc_list_lock(true);
+	static __typeof__(vl) vl_kept;
+	double window_kept = vl_window;
+	vl_kept = vl;
+	vl_begin(0);
+	cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+	cairo_t *cr = cairo_create(surface);
+	zmc.n_hits = 0;
+	double h = safe_content(zmc.app->render(cr, page));
+	cairo_destroy(cr);
+	cairo_surface_destroy(surface);
+	vl = vl_kept;
+	vl_window = window_kept;
+	zmc_list_lock(false);
+	memcpy(zmc.hits, saved, sizeof(saved[0]) * (size_t)n);
+	zmc.n_hits = n;
+	zmc.pivot_set = set;
+	zmc.pivot_page = other;
+	zmc.pivot_next_dx = next_dx;
+	return h;
+}
+
+void zmc_go_end(int target, int dir) {
+	if (zmc.page == target || zmc.anim_active) return;
+	double h = page_measure(target);
+	arrive_end = h > zmc.height ? h - zmc.height : 0;
+	zmc_go(target, dir);
+	arrive_end = 0;
 }
 
 void zmc_go(int target, int dir) {

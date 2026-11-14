@@ -419,6 +419,11 @@ def call_set(state, number=''):
 			tell_shell('notify Phone|Javobsiz qönğiroq|%s\n' % (call['number'] or 'Nomaʼlum raqam'))
 		call.update(number='', idx=0)
 	if state == 'incoming' and call['state'] != 'incoming':
+		# the screen on first, as Android does for a call (a call can wake
+		# the phone from a system sleep, wake bit 8, with the screen off);
+		# ztMETRO's own idle timer puts it out again. SMS does not light it:
+		# no proximity sensor yet, so not in a pocket for every message
+		tell_shell('screen on\n')
 		tell_shell('notify Phone|Kiruvçi qönğiroq|%s\n' % (number or 'Javob beriş uçun Telefonni oçing'))
 	if (state == 'incoming') != (call['state'] == 'incoming'):
 		ring(state == 'incoming')

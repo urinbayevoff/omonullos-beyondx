@@ -1,0 +1,18 @@
+[Unit]
+Description=Automatic system sleep once the screen is off (zsleepd, beyondx)
+# OmonullOS, November 2026: scripts/zsleepd.sh as /usr/local/bin/zsleepd.
+# Off switch: touch /etc/zsleepd.off (looked at every few seconds).
+After=zrn-cpuidle.service zaudio.service zmodem.service zwlan.service ztouch.service
+Wants=zrn-cpuidle.service
+ConditionPathExists=!/etc/zsleepd.off
+
+[Service]
+Type=simple
+# let the boot settle (modem, Wi-Fi, the shell) before the first sleep
+ExecStartPre=/bin/sleep 90
+ExecStart=/usr/local/bin/zsleepd
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=graphical.target

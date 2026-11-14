@@ -215,6 +215,7 @@ int zmc_render_png(const struct zmc_app *app, int page, int height, const char *
 void zmc_redraw(void);			/* something on the page changed */
 void zmc_scroll_end(void);		/* at the next drawing, show the end of the page (a conversation) */
 void zmc_go(int page, int dir);		/* turn to a page: dir > 0 deeper, < 0 back */
+void zmc_go_end(int page, int dir);	/* the same, arriving at the page's end (a conversation) */
 void zmc_turn(int dir);			/* this page's content changes: its rows swivel out and in */
 void zmc_back(void);
 void zmc_quit(void);

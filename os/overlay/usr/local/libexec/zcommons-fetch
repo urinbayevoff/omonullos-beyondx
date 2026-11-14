@@ -10,14 +10,26 @@
 #
 # Settings > theme > "download" starts zcommons-walls.service (polkit: the
 # phone's owner, no password). The last line of /run/zcommons-walls.status
-# is "ok", "busy" or "error: <why>".
+# is "ok", "busy" or "error: <why>"; while it runs, "progress HAVE TOTAL
+# files" (commons-fetch.py) for Settings' progress bar. The end is told to
+# the shell as a notification, as Settings may be closed by then.
 set -u
 LIB=/usr/local/lib/omonullos/wallpapers
 STATUS=/run/zcommons-walls.status
 MARK=/usr/local/share/backgrounds/ztos/.commons
 
 say() { echo "$1" > "$STATUS"; chmod 644 "$STATUS"; echo "$1"; }
-fail() { say "error: $1"; exit 1; }
+# a notification on the phone (ztMETRO's control pipe; never blocks on it)
+tell() {
+	for ctl in /run/user/*/ztmetro.ctl; do
+		[ -p "$ctl" ] && timeout 2 sh -c 'printf "%s\n" "$1" > "$2"' _ "notify Settings|$1|$2" "$ctl"
+	done
+}
+# a download or a retry can take minutes: the status stays fresh meanwhile
+MON=""
+stop_mon() { [ -n "$MON" ] && kill "$MON" 2>/dev/null; MON=""; }
+trap stop_mon EXIT
+fail() { stop_mon; say "error: $1"; tell "Yuklab bölmadi" "Wikimedia fon rasmlari: $1"; exit 1; }
 say busy
 
 [ -f "$LIB/commons-fetch.py" ] && [ -f "$LIB/commons-picked.json" ] || fail "not installed"
@@ -25,8 +37,12 @@ python3 -c 'import PIL' 2>/dev/null || fail "python-pillow is missing"
 # ~180 MB once cropped, the downloads pass through memory
 free=$(df -Pk /usr/local/share | awk 'NR==2 {print $4}')
 [ "${free:-0}" -gt 300000 ] || fail "not enough free space (300 MB needed)"
-python3 -I "$LIB/commons-fetch.py" "$LIB/commons-picked.json" /usr/local/share 16 ||
+( while :; do sleep 5; touch -c "$STATUS"; done ) &
+MON=$!
+ZCOMMONS_STATUS="$STATUS" python3 -I "$LIB/commons-fetch.py" "$LIB/commons-picked.json" /usr/local/share 16 ||
 	fail "nothing could be downloaded"
+stop_mon
 chmod -R a+rX /usr/local/share/backgrounds/ztos
 date -u +%F > "$MARK"
 say ok
+tell "Fon rasmlari yuklandi" "Yangi fon rasmlari endi röyxatda"

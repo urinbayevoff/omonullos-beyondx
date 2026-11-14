@@ -45,6 +45,8 @@
  * Modified for OmonullOS, November 2026: copy and paste in a terminal by touch: a held finger
  *   selects (foot's long-press), a bar with Copy | Paste | Close and two drag handles; the primary
  *   selection is served (wlr_primary_selection_v1), so its askers are answered.
+ * Modified for OmonullOS, November 2026: without Segoe UI Symbol the Windows Phone apps' tiles
+ *   draw our own line glyphs instead of the app's initial (draw_glyph).
  * Modified for OmonullOS, November 2026: nav_style = line: an iPhone-like line on a thin strip of
  *   frosted glass instead of the three buttons; swipe up for Start, rest on the way for the
  *   switcher, along the line right for the app before and left to come back (the order kept
@@ -3930,6 +3932,23 @@ static void draw_glyph(struct zt_server *server, cairo_t *cr, const char *icon,
 	}
 	if (sym && draw_icon_symbol(cr, sym, cx, cy, s)) {
 		return;	/* a known Windows Phone app: its real tile glyph */
+	}
+	/* OmonullOS: no Segoe UI Symbol (the public image ships without it): our
+	 * own line glyph for the app, not its initial ("P" on the Phone tile) */
+	if (sym) {
+		static const char *const VEC[][2] = {
+			{ "phone", "phone" }, { "people", "people" }, { "message", "message" },
+			{ "mail", "mail" }, { "music", "music" }, { "camera", "camera" },
+			{ "calendar", "calendar" }, { "store", "store" }, { "map", "map" },
+			{ "gear", "gear" }, { "folder", "folder" }, { "photos", "photo" },
+			{ "browser", "globe" },
+		};
+		for (size_t i = 0; i < sizeof(VEC) / sizeof(VEC[0]); i++) {
+			if (strcmp(sym, VEC[i][0]) == 0) {
+				draw_icon_vector(cr, VEC[i][1], cx, cy, s);
+				return;
+			}
+		}
 	}
 	if (icon[0] != '@') {
 		draw_icon(cr, icon, cx, cy, s);

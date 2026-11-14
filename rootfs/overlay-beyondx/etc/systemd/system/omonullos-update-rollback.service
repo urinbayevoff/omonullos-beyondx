@@ -1,0 +1,6 @@
+[Unit]
+Description=omonullOS: put back what the last update replaced
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/omonullos-update rollback

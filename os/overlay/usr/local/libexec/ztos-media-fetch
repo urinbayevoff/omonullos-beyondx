@@ -13,21 +13,46 @@
 # Settings > theme > "download" starts ztos-media.service (polkit: the phone's
 # owner, no password). The last line of /run/ztos-media.status is "ok",
 # "busy" or "error: <why>". See docs/s10-5g/FONTS.md.
+# Modified for OmonullOS, November 2026: while it runs the status says how far
+# it is, once a second ("progress DONE TOTAL" in bytes, then "unpack"), for
+# Settings' progress bar; the end is told to the shell as a notification, as
+# Settings may be closed by then.
 set -u
 COMMIT=b3bff4734727cea7e6d9c5092abdce415516daf2
 BASE="https://raw.githubusercontent.com/Zerone-Laboratories/ztOS/$COMMIT/prebuilts/ztos-media"
 STATUS=/run/ztos-media.status
 MARK=/usr/local/share/backgrounds/ztos/.ztos-media
 
+# the parts' sizes added up (prebuilts/ztos-media at $COMMIT)
+TOTAL=192409012
+MON=""
+
 say() { echo "$1" > "$STATUS"; chmod 644 "$STATUS"; echo "$1"; }
-fail() { say "error: $1"; exit 1; }
+# a notification on the phone (ztMETRO's control pipe; never blocks on it)
+tell() {
+	for ctl in /run/user/*/ztmetro.ctl; do
+		[ -p "$ctl" ] && timeout 2 sh -c 'printf "%s\n" "$1" > "$2"' _ "notify Settings|$1|$2" "$ctl"
+	done
+}
+stop_mon() { [ -n "$MON" ] && kill "$MON" 2>/dev/null; MON=""; }
+fail() { stop_mon; say "error: $1"; tell "Yuklab bölmadi" "ztOS fon rasmlari: $1"; exit 1; }
 say busy
 
 # 184 MB of parts, then ~215 MB unpacked
 free=$(df -Pk /var/tmp | awk 'NR==2 {print $4}')
 [ "${free:-0}" -gt 460000 ] || fail "not enough free space (450 MB needed)"
 TMP=$(mktemp -d /var/tmp/ztos-media.XXXXXX) || fail "no temporary folder"
-trap 'rm -rf "$TMP"' EXIT
+trap 'stop_mon; rm -rf "$TMP"' EXIT
+
+# how far: the parts on disk so far, partial ones too
+(
+	while :; do
+		b=$(du -cb "$TMP" 2>/dev/null | tail -n1 | cut -f1)
+		echo "progress ${b:-0} $TOTAL" > "$STATUS"
+		sleep 1
+	done
+) &
+MON=$!
 
 while read -r sum name; do
 	[ -n "$name" ] || continue
@@ -60,9 +85,15 @@ efeb0f8905e64beda9a9757e408cbdef92d011797516112e855b5a8b04a06899 ztos-media.tar.
 6aa8cb94cc17646d02cea6b5e30266aa3b2708ccd050e6292d3ebe028a470254 ztos-media.tar.xz.partaw
 SUMS
 
+stop_mon
+# unpacking: the same line again every few seconds, so it is not taken for stale
+( while :; do echo unpack > "$STATUS"; sleep 5; done ) &
+MON=$!
 cat "$TMP"/ztos-media.tar.xz.part* | tar -C / --no-same-owner --no-same-permissions --skip-old-files \
 	-xJf - usr/local/share/backgrounds usr/local/share/sounds ||
 	fail "could not unpack"
 chmod -R a+rX /usr/local/share/backgrounds/ztos /usr/local/share/sounds/ztos
 echo "$COMMIT" > "$MARK"
+stop_mon
 say ok
+tell "Fon rasmlari yuklandi" "Yangi fon rasmlari va ohanglar endi röyxatlarda"

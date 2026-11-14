@@ -5,7 +5,8 @@ its standard widths now (https://w.wiki/GHai; other widths get HTTP 429), so
 the width asked for is the next standard one (or the original). Files that
 are already there are kept and not downloaded again (the image ships three
 of them, zcommons-fetch adds the rest on the phone), and .credits.tsv keeps
-its lines. Exits 1 when no wallpaper at all is there afterwards.
+its lines. With ZCOMMONS_STATUS set, that file gets "progress HAVE TOTAL
+files" after each one, for Settings' progress bar. Exits 1 when no wallpaper at all is there afterwards.
 """
 import io, json, math, os, sys, time, urllib.request, urllib.parse
 from PIL import Image, ImageOps
@@ -35,6 +36,15 @@ def cover(im, size):
     return im.crop((l, t, l + size[0], t + size[1]))
 cands = json.load(open(sys.argv[1])); out = sys.argv[2]; N = int(sys.argv[3])
 root = os.path.join(out, "backgrounds", "ztos"); seen = set(); have = 0
+# ZCOMMONS_STATUS: where zcommons-fetch wants "progress HAVE TOTAL files"
+status = os.environ.get("ZCOMMONS_STATUS"); total = N * len(cands)
+def progress():
+    if not status: return
+    try:
+        with open(status + ".tmp", "w") as f: f.write("progress %d %d files\n" % (have, total))
+        os.chmod(status + ".tmp", 0o644); os.replace(status + ".tmp", status)
+    except OSError: pass
+progress()
 cred_path = os.path.join(root, ".credits.tsv")
 credits = {}
 if os.path.exists(cred_path):
@@ -50,7 +60,7 @@ for series, lst in cands.items():
         seen.add(c["title"])
         name = "%02d.jpg" % (n + 1)
         if os.path.exists(os.path.join(dst, name)):
-            n += 1; have += 1; continue
+            n += 1; have += 1; progress(); continue
         k = max(W / c["w"], H / c["h"])
         need = math.ceil(c["w"] * k)
         step = next((s for s in STEPS if s >= need), None)
@@ -68,6 +78,7 @@ for series, lst in cands.items():
         cover(im, THUMB).save(os.path.join(th, name + ".jpg"), quality=82)
         credits["%s/%s" % (series, name)] = "%s/%s\t%s\t%s\t%s" % (series, name, c["title"], c["license"], c["page"])
         print(series, name, c["title"][:60], flush=True)
+        progress()
 open(cred_path, "w", encoding="utf-8").write("\n".join(credits[k] for k in sorted(credits)) + "\n")
 print("wallpapers:", have, flush=True)
 sys.exit(0 if have else 1)

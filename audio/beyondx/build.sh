@@ -37,6 +37,22 @@ mkdir -p "$M"
 cp "$ROOT/audio/beyondx/Kbuild" "$M/Kbuild"
 cp "$ROOT/audio/beyondx/snd-zrn-abox-bx.c" "$M/abox.c"
 cp "$K/sound/soc/codecs/cs35l41-lib.c" "$M/cs35l41-lib.c"
+cp "$K/drivers/firmware/cirrus/cs_dsp.c" "$K/drivers/firmware/cirrus/cs_dsp.h" "$M/"
+# a tuning (.bin) into a booted core, as stock cirrus-cal.c's cs35l41_load_config
+# (dsp_calibrate); cs_dsp keeps cs_dsp_load_coeff static
+cat >> "$M/cs_dsp.c" <<'EOF'
+
+int zrn_cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *fw, const char *file);
+int zrn_cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *fw, const char *file)
+{
+	int ret;
+
+	mutex_lock(&dsp->pwr_lock);
+	ret = cs_dsp_load_coeff(dsp, fw, file);
+	mutex_unlock(&dsp->pwr_lock);
+	return ret;
+}
+EOF
 make -s -C "$K" O=out-snd M="$M" modules 2>&1 | grep -E "error|warning|undefined" || true
 mkdir -p "$M/out"
 cp "$K"/out-snd/sound/soundcore.ko "$K"/out-snd/sound/core/snd{,-timer,-pcm}.ko \

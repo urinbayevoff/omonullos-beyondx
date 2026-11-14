@@ -25,6 +25,8 @@
  * Modified for OmonullOS, October 2026: the compose caption and notes in the
  * language; the send button takes its tap (it was under the box's hit).
  * Modified for OmonullOS, November 2026: "sending..." and "not sent" in it too.
+ * Modified for OmonullOS, November 2026: a conversation opens on its newest message
+ *   (zmc_go_end), not scrolled to its first.
  */
 #define _GNU_SOURCE
 #include <math.h>
@@ -864,7 +866,7 @@ static void send_draft(void) {
 	box_measure();
 	if (zmc.page == P_NEW) {
 		focus = 0;
-		zmc_go(P_THREAD, 1);
+		zmc_go_end(P_THREAD, 1);
 		zmc_scroll_end();
 	} else {
 		rise_begin(n_messages - 1);
@@ -890,7 +892,7 @@ static void activate(int action, int arg) {
 		if (selecting && arg >= 0 && arg < n_threads) { selected[arg] = !selected[arg]; break; }
 		if (arg >= 0 && arg < n_threads) {
 			open_thread(threads[arg].number);
-			zmc_go(P_THREAD, 1);
+			zmc_go_end(P_THREAD, 1);	/* on the newest message, not the oldest */
 			zmc_scroll_end();
 		}
 		break;

@@ -1,0 +1,16 @@
+// omonullOS: the person at the phone (and the wheel group) may look for,
+// install and roll back omonullOS updates without a password; the Updates app
+// starts these services. What gets installed is still only what the owner's
+// key signed (omonullos-update checks that, not polkit).
+//
+// Added for OmonullOS, November 2026.
+polkit.addRule(function (action, subject) {
+	if (action.id == "org.freedesktop.systemd1.manage-units" &&
+			((subject.local && subject.active) || subject.isInGroup("wheel"))) {
+		var unit = action.lookup("unit");
+		if ((unit == "omonullos-update-check.service" || unit == "omonullos-update-apply.service" ||
+				unit == "omonullos-update-rollback.service") && action.lookup("verb") == "start") {
+			return polkit.Result.YES;
+		}
+	}
+});
