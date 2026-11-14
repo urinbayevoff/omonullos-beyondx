@@ -29,6 +29,10 @@
 #     the values S-Boot left (read at start); the TA rate returns only once
 #     the battery is below 40 C and the others below 55 C
 #
+# Off the cable (no DCP or PC port seen, no rate of ours set) the NTCs are
+# not read, except for the log line once a minute: nothing then depends on
+# them, and their ADC reads were most of the loop's CPU.
+#
 # AFC (Samsung's Adaptive Fast Charging, 9 V), owner's «ha» 2026-10-17: once
 # per plug-in, at the TA rate with the battery below 38 C, the input limit
 # goes to 1650 mA first, then the USB-C firmware is asked for 9 V the way
@@ -42,7 +46,9 @@
 # Writes only CNFG_09/CNFG_02, only when they differ, and reads them back;
 # plus the AFC mailbox commands. zboot.chg=off leaves zchg out (wdt-pet.sh).
 #
-# Added for OmonullOS, October 2026. Tested on the phone (bx18) on the
+# Added for OmonullOS, October 2026. Modified for OmonullOS, November 2026:
+# NTCs off the cable only once a minute, ntc() without a cut per step.
+# Tested on the phone (bx18) on the
 # owner's PD charger: +1.2-1.3 A into the battery, back to S-Boot's values
 # within 3 s of unplugging.
 
@@ -95,15 +101,16 @@ ntc() {	# ntc <raw> <adc table>: 0.1 C, or 9999 when off the table
 	[ "$raw" -ge 0 ] || { echo 9999; return; }
 	set -- $2
 	[ "$raw" -ge "$1" ] || { echo 9999; return; }
-	i=0; pa=; pt=
+	# T_DATA walked alongside, word by word, without a cut per step
+	td="$T_DATA "; pa=; pt=
 	for x; do
-		ta=$(echo "$T_DATA" | cut -d' ' -f$((i + 1)))
+		ta=${td%% *}; td=${td#* }
 		if [ "$raw" -le "$x" ]; then
 			[ -z "$pa" ] && { echo "$ta"; return; }
 			echo $(( pt + (ta - pt) * (raw - pa) / (x - pa) ))
 			return
 		fi
-		pa=$x; pt=$ta; i=$((i + 1))
+		pa=$x; pt=$ta
 	done
 	echo 9999
 }
@@ -159,10 +166,6 @@ say "on; S-Boot left input code $S_ILIM, charge code $S_CC"
 mode=sboot
 while :; do
 	bc=$(r8 0x25 0x08)
-	tb=$(ntc "$(adc 4)" "$T_BAT")
-	tc=$(ntc "$(adc 3)" "$T_CHG")
-	tu=$(ntc "$(adc 1)" "$T_USB")
-	other=$tc; [ "$tu" -gt "$other" ] && other=$tu
 	cc=$(r8 0x25 0x0a)
 	dcp=0 pc=0
 	if [ "$bc" -ge 0 ] && [ $((bc >> 7)) -eq 1 ]; then
@@ -175,6 +178,18 @@ while :; do
 		elif [ $((bc & 3)) -ge 1 ]; then
 			pc=1
 		fi
+	fi
+	logdue=0; [ $((t = ${t:-0} + 1)) -ge 20 ] && { logdue=1; t=0; }
+	# the NTCs only matter with a charger in, or while one of its rates is
+	# set; off the cable they were most of this loop's CPU (2026-11-05:
+	# ~27 % of a core at idle, three ADC reads every 3 s), so then they are
+	# read only for the line a minute
+	if [ $dcp -eq 1 ] || [ $pc -eq 1 ] || [ $logdue -eq 1 ] ||
+	   [ "$mode" = ta ] || [ "$mode" = afc ] || [ "$mode" = pc ]; then
+		tb=$(ntc "$(adc 4)" "$T_BAT")
+		tc=$(ntc "$(adc 3)" "$T_CHG")
+		tu=$(ntc "$(adc 1)" "$T_USB")
+		other=$tc; [ "$tu" -gt "$other" ] && other=$tu
 	fi
 	if [ "$mode" = afc ]; then
 		vb=$(vbadc)
@@ -219,6 +234,6 @@ while :; do
 		fi
 	fi
 	# a line a minute, for the log
-	[ $((t = ${t:-0} + 1)) -ge 20 ] && { say "$mode, BC_STATUS $bc, CC_STATUS0 $cc, battery $tb, charger $tc, usb $tu (0.1 C)"; t=0; }
+	[ $logdue -eq 1 ] && { say "$mode, BC_STATUS $bc, CC_STATUS0 $cc, battery $tb, charger $tc, usb $tu (0.1 C)"; t=0; }
 	sleep 3
 done

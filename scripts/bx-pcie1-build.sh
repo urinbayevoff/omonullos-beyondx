@@ -2,8 +2,8 @@
 # build kernel/beyondx/pcie1 (PCIe channel 1, S5100) against out-beyondx and
 # copy pcie-exynos9820-ch1.ko to the phone's /root/tools
 set -e
-R=/mnt/novyi-tom/OmonullOS; B=$R/build; S=$R/kernel/beyondx/pcie1
-export PATH=$B/toolchain/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu/bin:$PATH ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu-
+R=${R:-$(cd "$(dirname "$0")/.." && pwd)}; B=${B:-$R/build}; S=$R/kernel/beyondx/pcie1
+export PATH=$B/toolchain/arm-gnu-toolchain-14.2.rel1-$(uname -m)-aarch64-none-linux-gnu/bin:$PATH ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu-
 DTC=$B/linux-7.1/out-beyondx/scripts/dtc/dtc
 rm -rf $B/pcie1-module; cp -r $S $B/pcie1-module; cd $B/pcie1-module
 mkdir -p include/linux; cp $R/modem/beyondx/zinc/linux/exynos-pci-noti.h include/linux/

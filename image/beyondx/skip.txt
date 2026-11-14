@@ -1,0 +1,56 @@
+# Overlay files (os/overlay, rootfs/overlay) the image leaves out, as paths in
+# the image. They came from upstream ztOS after the phone's system was set up
+# (2026-10-16) and were never on the tested phone: the first image keeps to
+# what the phone runs. Each can come back once tried on the phone.
+# A trailing / is a whole directory. Added for OmonullOS, November 2026.
+
+# upstream's updater and store helpers: pull ztOS's own releases and packages
+/etc/systemd/system/ztos-update-apply.service
+/etc/systemd/system/ztos-update-check.service
+/etc/systemd/system/ztos-update-check.timer
+/etc/polkit-1/rules.d/50-ztos-update.rules
+/usr/local/sbin/ztos-update
+/etc/systemd/system/ztstore-admin@.service
+/etc/systemd/system/ztstore-install@.service
+/etc/polkit-1/rules.d/50-ztstore.rules
+/usr/local/sbin/ztstore-helper
+/usr/local/libexec/ztstore/
+# Android (Waydroid) and Bluetooth: not in this image
+/usr/local/bin/ztos-android
+/usr/local/sbin/ztos-android-dependencies
+/usr/share/applications/ztos-android-apk.desktop
+/etc/pipewire/pipewire.conf.d/90-ztos-waydroid-latency.conf
+/etc/pipewire/pipewire-pulse.conf.d/90-ztos-waydroid-latency.conf
+/usr/local/bin/ztos-bt-state
+/etc/bluetooth/
+/etc/wireplumber/wireplumber.conf.d/52-ztos-bluetooth.conf
+# boot, shutdown and recovery changes not tried on the S10 5G
+/etc/sysctl.d/20-quiet-console.conf
+/etc/sysctl.d/30-panic-reboot.conf
+/etc/sysctl.d/90-ztos-compaction.conf
+/etc/systemd/coredump.conf.d/
+/etc/systemd/pstore.conf.d/
+/etc/systemd/system.conf.d/10-splash.conf
+/etc/systemd/system/emergency.service.d/
+/etc/systemd/system/rescue.service.d/
+/etc/systemd/system/systemd-coredump@.service.d/
+/etc/systemd/system/systemd-fsck-root.service.d/
+/etc/systemd/system/systemd-fsck@.service.d/
+/etc/systemd/system/multi-user.target.wants/ztos-memory-policy.service
+/etc/systemd/system/timers.target.wants/ztos-memory-policy.timer
+/etc/systemd/system/ztos-memory-policy.service
+/etc/systemd/system/ztos-memory-policy.timer
+/etc/systemd/system/ztos-fs-recovery-reset.service
+/etc/systemd/system/ztos-fs-recovery-rollback.service
+/etc/systemd/system/ztos-pstore-keep.service
+/usr/lib/systemd/system-shutdown/ztos-root-ro
+/usr/local/sbin/ztos-auto-recover
+/usr/local/sbin/ztos-fs-recovery-reset
+/usr/local/sbin/ztos-fs-recovery-rollback
+/usr/local/sbin/ztos-fsck
+/usr/local/sbin/ztos-memory-policy
+# upstream's sound daemon and realtime drop-ins (the phone runs plain PipeWire)
+/etc/systemd/user/ztos-soundd.service
+/usr/local/bin/ztos-soundd
+/etc/systemd/user/pipewire.service.d/50-audio-realtime.conf
+/etc/systemd/user/pipewire-pulse.service.d/50-audio-realtime.conf

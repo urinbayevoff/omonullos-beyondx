@@ -22,6 +22,8 @@
 # Added for OmonullOS, October 2026. The owner asked for the GPU at every
 # boot (2026-10-17); levels tested by hand first: 702 MHz = 148 fps in
 # gputest, 58 C after 20 s (docs/s10-5g/log.md 10:45).
+# Modified for OmonullOS, November 2026: calibration read once, no G3D
+# reads with the panel off, dpms without cat (~6 % of a core at idle).
 
 LEVEL=${1:-572} HOT=${2:-75} CLEAR=${3:-60}
 LOW=260
@@ -33,13 +35,24 @@ say() {
 	echo "zboot| gpu: $*" > /dev/kmsg 2>/dev/null
 }
 
-g3d() {	# whole degrees, the hottest G3D sensor (see ztemp)
+# per-sensor calibration (c25, c85) does not change: read once
+G3D_S="1 2 3 4 9"
+calib() {
 	two=$((($(devmem $B 32) >> 23) & 1))
-	max=-100
-	for s in 1 2 3 4 9; do
+	for s in $G3D_S; do
 		t=$(devmem $((B + 4 * s)) 32)
-		a=$((t & 0x1ff)) b=$(((t >> 9) & 0x1ff))
-		w=$(devmem $((B + 0x84 + 4 * (s / 2))) 32)
+		eval "a_$s=$((t & 0x1ff)) b_$s=$(((t >> 9) & 0x1ff))"
+	done
+}
+
+g3d() {	# whole degrees, the hottest G3D sensor (see ztemp)
+	max=-100
+	lastw=
+	for s in $G3D_S; do
+		wi=$((s / 2))
+		# sensors 2 and 3 share a CURRENT_TEMP word: one read for both
+		[ "$wi" = "$lastw" ] || { w=$(devmem $((B + 0x84 + 4 * wi)) 32); lastw=$wi; }
+		eval "a=\$a_$s b=\$b_$s"
 		code=$(((w >> (16 * (s % 2))) & 0x1ff))
 		if [ "$two" -eq 1 ] && [ "$b" -gt "$a" ]; then
 			v=$(((code - a) * 60 / (b - a) + 25))
@@ -53,7 +66,7 @@ g3d() {	# whole degrees, the hottest G3D sensor (see ztemp)
 
 screen_off() {	# the DSI panel's dpms, bx-decon only (simpledrm has none)
 	for d in /sys/class/drm/card*-DSI-*/dpms; do
-		[ -r "$d" ] && [ "$(cat "$d")" = Off ] && return 0
+		[ -r "$d" ] && read -r v < "$d" && [ "$v" = Off ] && return 0
 	done
 	return 1
 }
@@ -77,16 +90,19 @@ if [ -f $M/bx-decon.ko ] && ! grep -q '^bx_decon ' /proc/modules; then
 		insmod $M/bx-decon.ko || say "bx-decon did not load: simpledrm stays"
 fi
 [ "$1" = load ] && exit 0
+calib
 set_bus $MIF_ON 534
 set_g3d "$LEVEL"
 say "panfrost loaded, g3d $LEVEL MHz; down to $LOW at $HOT C, back below $CLEAR C; now $(g3d) C"
 
 state=normal
 while :; do
-	T=$(g3d)
+	# panel off: G3D sits at IDLE and zthermal watches every sensor, so the
+	# temperature is read only for the log line when going idle
 	if screen_off && [ ! -e /run/zcall-bus ]; then	# zcell: a call keeps MIF/INT up
 		want=idle
-	elif [ "$T" -ge "$HOT" ] || { [ $state = hot ] && [ "$T" -ge "$CLEAR" ]; }; then
+		[ $state != idle ] && T=$(g3d)
+	elif T=$(g3d); [ "$T" -ge "$HOT" ] || { [ $state = hot ] && [ "$T" -ge "$CLEAR" ]; }; then
 		want=hot
 	else
 		want=normal

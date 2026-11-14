@@ -1,0 +1,12 @@
+# Added for OmonullOS, November 2026: the Wikimedia Commons wallpapers,
+# downloaded on request (Settings > theme), see zcommons-fetch
+[Unit]
+Description=omonullOS: download the Wikimedia Commons wallpapers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/zcommons-fetch
+TimeoutStartSec=3h
+Nice=10

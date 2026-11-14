@@ -1,0 +1,66 @@
+#!/bin/sh
+# zvendor-firmware: the Wi-Fi and audio firmware this image does not carry
+# (Broadcom's and Samsung's, not ours to give out), copied from the phone's
+# own VENDOR partition into /usr/lib/firmware under the names our drivers ask
+# for (firmware/beyondx/README.md). VENDOR is only read: mounted read only
+# with noload (no ext4 journal replay), or used where zmodem already has it.
+# Runs before Wi-Fi, sound and the modem; does nothing once all are there.
+# Added for OmonullOS, November 2026.
+set -u
+F=${ZVF_DEST:-/usr/lib/firmware}	# another place only to try it out
+V=/mnt/vendor
+# name in VENDOR/firmware -> name under /usr/lib/firmware
+LIST="
+bcmdhd_sta.bin_b1 brcm/brcmfmac4375-pcie.bin
+nvram.txt_CS01_semco_b1 brcm/brcmfmac4375-pcie.txt
+bcmdhd_clm.blob brcm/brcmfmac4375-pcie.clm_blob
+calliope_dram.bin calliope_dram.bin
+calliope_dram_2.bin calliope_dram_2.bin
+calliope_sram.bin calliope_sram.bin
+calliope_sram_2.bin calliope_sram_2.bin
+calliope2.dt calliope2.dt
+APDV_AUDIO_SLSI.bin APDV_AUDIO_SLSI.bin
+SoundBoosterParam.bin SoundBoosterParam.bin
+rxse.bin rxse.bin
+txse1.bin txse1.bin
+txse2.bin txse2.bin
+"
+log() { echo "zvendor-firmware: $*"; echo "zboot| vendor-firmware: $*" 2>/dev/null > /dev/kmsg; }
+
+missing() {
+	echo "$LIST" | while read -r _ dst; do
+		[ -n "$dst" ] && [ ! -s "$F/$dst" ] && echo "$dst"
+	done
+}
+[ -z "$(missing)" ] && exit 0
+
+dev=
+for i in $(seq 20); do	# udev makes the by-partlabel links early in boot
+	dev=$(readlink -f /dev/disk/by-partlabel/vendor 2>/dev/null) && [ -b "$dev" ] && break
+	dev=; sleep 0.5
+done
+[ -n "$dev" ] || { log "no VENDOR partition"; exit 1; }
+
+ours=0
+if ! mountpoint -q $V; then
+	mkdir -p $V
+	mount -t ext4 -o ro,noload "$dev" $V || { log "cannot mount $dev read only"; exit 1; }
+	ours=1
+fi
+bad=0
+echo "$LIST" | { while read -r src dst; do
+	[ -n "$src" ] || continue
+	[ -s "$F/$dst" ] && continue
+	if [ ! -s "$V/firmware/$src" ]; then
+		log "not in VENDOR: $src"; bad=1; continue
+	fi
+	mkdir -p "$(dirname "$F/$dst")"
+	case $dst in
+	*.txt) tr -d '\r' < "$V/firmware/$src" > "$F/$dst.new" ;;	# brcmfmac wants no CRs
+	*) cp "$V/firmware/$src" "$F/$dst.new" ;;
+	esac && chmod 644 "$F/$dst.new" && mv "$F/$dst.new" "$F/$dst" && log "$src -> $dst"
+done; exit $bad; } || bad=1
+sync
+[ $ours = 1 ] && umount $V
+[ -z "$(missing)" ] || { log "still missing: $(missing | tr '\n' ' ')"; exit 1; }
+exit 0

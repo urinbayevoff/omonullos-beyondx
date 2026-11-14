@@ -1,0 +1,58 @@
+# Packages of the OmonullOS image for the Galaxy S10 5G (scripts/build-beyondx-image.sh).
+# The phone's own list (pacman -Qqe, 2026-11-12) less what the owner left out:
+# no Telegram, Firefox, Chromium, no developer tools (cmake, strace, gperf,
+# glmark2, mesa-utils, android-tools, tmux), no media extras (mpv, yt-dlp,
+# cava) and no nodejs/npm. The kernel is the BOOT image's, never a package.
+# Added for OmonullOS, November 2026.
+
+base
+base-devel
+archlinuxarm-keyring
+sudo
+polkit
+which
+nano
+git
+openssh
+# network
+networkmanager
+wpa_supplicant
+iw
+wireless-regdb
+# sound
+alsa-utils
+pipewire
+pipewire-alsa
+pipewire-pulse
+wireplumber
+rtkit
+libpulse
+# the shell (ztMETRO builds against these)
+greetd
+wlroots0.20
+wayland-protocols
+mesa
+libinput
+libxkbcommon
+xkeyboard-config
+cairo
+pango
+pixman
+librsvg
+gdk-pixbuf2
+json-c
+gst-plugins-base-libs
+wl-clipboard
+grim
+foot
+foot-terminfo
+# fonts
+noto-fonts
+noto-fonts-emoji
+ttf-dejavu
+# Python: the modem (zcell, zsms, zril), zgov, zacpm, the ztOS SDK's apps
+python
+python-pillow
+pyside6
+qt6-svg
+qt6-wayland

@@ -64,6 +64,8 @@
 #                                (kernel/beyondx/pre-root.sh) and boots the
 #                                Arch root labelled ZR_ARCH on userdata
 #
+# Modified for OmonullOS, November 2026: without stock/ (CI), the beyondx
+# reference header comes from kernel/beyondx/make-ref-header.py.
 # Modified for OmonullOS, October 2026: --device beyondx, the Galaxy S10 5G
 # (SM-G977N) at stage 3: mainline 7.1 with the device tree in kernel/beyondx
 # (CPUs, GIC, timer, the bootloader's framebuffer, nothing else), upstream
@@ -146,6 +148,13 @@ beyondx)
 		exit 2
 	fi
 	REF=$ROOT/stock/firmware/HWD3/img/boot.img	# stock G977NKSU6HWD3, header v1
+	# Without the stock firmware (CI, phone): the same header fields, written
+	# by make-ref-header.py (mkboot-v1 only reads the header of its --ref)
+	if [ ! -f "$REF" ]; then
+		mkdir -p "$B"
+		REF=$B/boot-ref-header.img
+		python3 -I "$ROOT/kernel/beyondx/make-ref-header.py" "$REF"
+	fi
 	[ -f "$REF" ] || { echo "missing $REF (stock firmware, see docs/s10-5g/log.md)" >&2; exit 1; }
 	;;
 *) echo "--device starlte|beyondx" >&2; exit 2 ;;

@@ -6,7 +6,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 S=$ROOT/power/suspend
-B=$HOME/omonullos-src/build K=$B/linux-7.1 M=$B/sleep-bx
+B=${B:-$HOME/omonullos-src/build} K=$B/linux-7.1 M=$B/sleep-bx
 export PATH=$B/hostbin:$B/toolchain/arm-gnu-toolchain-14.2.rel1-$(uname -m)-aarch64-none-linux-gnu/bin:$PATH
 export LC_ALL=C ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- KBUILD_MODPOST_WARN=1
 O=out-beyondx

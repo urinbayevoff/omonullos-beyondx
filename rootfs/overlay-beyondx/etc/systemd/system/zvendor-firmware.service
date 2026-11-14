@@ -1,0 +1,18 @@
+# Galaxy S10 5G: the Wi-Fi and audio firmware from the phone's own VENDOR
+# partition, read only (/usr/local/sbin/zvendor-firmware), before anything
+# loads it. A no-op once copied. Added for OmonullOS, November 2026.
+[Unit]
+Description=zboot (Galaxy S10 5G): firmware from the phone's VENDOR partition
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=zwlan.service zaudio.service zmodem.service sysinit.target
+ConditionPathIsReadWrite=/usr/lib/firmware
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zvendor-firmware
+TimeoutStartSec=60
+
+[Install]
+WantedBy=sysinit.target

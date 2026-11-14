@@ -1,0 +1,32 @@
+#!/bin/sh
+# zcommons-fetch: fetch omonullOS's Wikimedia Commons wallpapers (root, from
+# zcommons-walls.service).
+#
+# Added for OmonullOS, November 2026. The image ships three of them; the
+# rest (11 series, 16 each, CC BY / CC BY-SA / public domain, credits in
+# /usr/local/share/backgrounds/ztos/.credits.tsv) is downloaded from
+# Wikimedia Commons on request, cover-cropped to 1440x3040 on the phone
+# (commons-fetch.py, Pillow). Files already there are kept.
+#
+# Settings > theme > "download" starts zcommons-walls.service (polkit: the
+# phone's owner, no password). The last line of /run/zcommons-walls.status
+# is "ok", "busy" or "error: <why>".
+set -u
+LIB=/usr/local/lib/omonullos/wallpapers
+STATUS=/run/zcommons-walls.status
+MARK=/usr/local/share/backgrounds/ztos/.commons
+
+say() { echo "$1" > "$STATUS"; chmod 644 "$STATUS"; echo "$1"; }
+fail() { say "error: $1"; exit 1; }
+say busy
+
+[ -f "$LIB/commons-fetch.py" ] && [ -f "$LIB/commons-picked.json" ] || fail "not installed"
+python3 -c 'import PIL' 2>/dev/null || fail "python-pillow is missing"
+# ~180 MB once cropped, the downloads pass through memory
+free=$(df -Pk /usr/local/share | awk 'NR==2 {print $4}')
+[ "${free:-0}" -gt 300000 ] || fail "not enough free space (300 MB needed)"
+python3 -I "$LIB/commons-fetch.py" "$LIB/commons-picked.json" /usr/local/share 16 ||
+	fail "nothing could be downloaded"
+chmod -R a+rX /usr/local/share/backgrounds/ztos
+date -u +%F > "$MARK"
+say ok

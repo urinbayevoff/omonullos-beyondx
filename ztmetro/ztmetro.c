@@ -3412,6 +3412,12 @@ static void safe_tell(void);
 static void load_config(struct zt_server *server) {
 	char path[512];
 	const char *home = getenv("HOME");
+	/* Settings, the phone and the ringtone picker write into this directory
+	 * and give up quietly when it is missing (a home made without /etc/skel) */
+	snprintf(path, sizeof(path), "%s/.config", home ? home : "");
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/.config/ztmetro", home ? home : "");
+	mkdir(path, 0755);
 	snprintf(path, sizeof(path), "%s/.config/ztmetro/config", home ? home : "");
 	server->accent = 0x0050ef;	/* cobalt */
 	line_idle_ms = 3000;

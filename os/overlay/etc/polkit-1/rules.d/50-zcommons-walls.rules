@@ -1,0 +1,12 @@
+// Added for OmonullOS, November 2026: Settings > theme downloads the
+// Wikimedia Commons wallpapers (zcommons-walls.service). The phone's owner
+// (wheel) may start it without a password; only start, only this unit.
+polkit.addRule(function (action, subject) {
+	if (action.id == "org.freedesktop.systemd1.manage-units" &&
+	    action.lookup("unit") == "zcommons-walls.service" &&
+	    action.lookup("verb") == "start" &&
+	    subject.isInGroup("wheel")) {
+		return polkit.Result.YES;
+	}
+	return polkit.Result.NOT_HANDLED;
+});

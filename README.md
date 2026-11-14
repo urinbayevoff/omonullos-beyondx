@@ -14,6 +14,8 @@ ztOS's work. Thank you for building it and sharing it.
   is omonullOS (written with a small o).
 - The Galaxy S10 5G (`beyondx`) as a target next to the S9.
 - ztMETRO and our apps in Uzbek, in the 2026 Latin alphabet (ö ğ ş ç).
+- Install on the S10 5G: [docs/s10-5g/INSTALL.md](docs/s10-5g/INSTALL.md)
+  (BOOT and root images built by GitHub Actions, see Releases).
 
 Like ztOS, omonullOS is licensed under the GNU GPL v3 ([LICENSE](LICENSE));
 ztOS's copyright notices are kept as they are.

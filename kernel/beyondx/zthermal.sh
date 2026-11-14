@@ -1,8 +1,9 @@
 #!/bin/sh
 # zthermal: a thermal guard for the Galaxy S10 5G until a real thermal driver
 # (TMU + cpufreq) is in. Nothing else limits heat: four big cores loaded take
-# the SoC from 41 to 57 C in six seconds. Reads the TMU once a second (as
-# ztemp does, devmem only) and acts on the hottest of its eleven sensors:
+# the SoC from 41 to 57 C in six seconds. Reads the TMU once a second, every
+# two below CLEAR - 10 (as ztemp does, devmem only) and acts on the hottest
+# of its eleven sensors:
 #
 #   >= SOFT (75 C): every task's affinity to the A55s (cpu0-3), so the A75s
 #                   and M4s go idle; undone below CLEAR (60 C)
@@ -21,6 +22,8 @@
 #
 # Added for OmonullOS, October 2026. Tested on the phone (bx15): each level
 # triggered on purpose with low test levels, see docs/s10-5g/log.md.
+# Modified for OmonullOS, November 2026: every 2 s while well below CLEAR
+# (the guards took ~35 % of a core at idle).
 
 B=0x10090000
 WDT=0x10050000
@@ -97,5 +100,12 @@ while :; do
 	# a soft state keeps new tasks off the big cores too: they inherit it
 	# from their parents, but recheck so nothing escapes
 	[ "$state" = soft ] && [ $((n = ${n:-0} + 1)) -ge 10 ] && { affinity 0f; n=0; }
-	sleep 1
+	# well below every level, every other second: four loaded big cores
+	# climb ~3 C/s (41 -> 57 C in 6 s), so from under CLEAR - 10 the next
+	# read is still far from SOFT, and from there on it is every second
+	if [ "$state" = normal ] && [ "$T" -lt $((CLEAR - 10)) ]; then
+		sleep 2
+	else
+		sleep 1
+	fi
 done

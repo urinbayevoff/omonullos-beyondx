@@ -3,7 +3,7 @@
 # (7.1.0-zboot, out-beyondx), into $B/idle-bx.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-B=$HOME/omonullos-src/build K=$B/linux-7.1 M=$B/idle-bx
+B=${B:-$HOME/omonullos-src/build} K=$B/linux-7.1 M=$B/idle-bx
 # x86_64-hosted toolchain on the PC, aarch64-hosted on the phone itself
 # (November 2026: no PC); the phone's tree is out-snd (audio/beyondx/build.sh
 # prepares it: out-beyondx's built-in options, modules_prepare done)

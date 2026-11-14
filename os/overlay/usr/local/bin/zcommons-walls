@@ -1,0 +1,14 @@
+#!/bin/sh
+# zcommons-walls: ask the system to fetch the Wikimedia Commons wallpapers.
+#
+# Added for OmonullOS, November 2026. The download runs as root in
+# zcommons-walls.service (/usr/local/libexec/zcommons-fetch); polkit lets the
+# phone's owner start it without a password. This waits for it and prints
+# its last line: "ok" or "error: <why>". Used by Settings > theme.
+systemctl start zcommons-walls.service 2>/dev/null
+st=$(tail -n1 /run/zcommons-walls.status 2>/dev/null)
+case "$st" in
+ok) echo ok ;;
+"error: "*) echo "$st" ;;
+*) echo "error: the download did not start" ;;
+esac

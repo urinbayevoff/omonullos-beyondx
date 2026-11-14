@@ -7,7 +7,7 @@
 # audio/build.sh does for the S9), nothing built-in changed.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-B=$HOME/omonullos-src/build K=$B/linux-7.1 M=$B/abox-bx
+B=${B:-$HOME/omonullos-src/build} K=$B/linux-7.1 M=$B/abox-bx
 # the same ARM GNU 14.2.Rel1 the flashed kernel was built with: x86_64-hosted
 # on the PC, aarch64-hosted on the phone itself (no PC, November 2026; the
 # phone has no bc, so busybox's applet stands in from $B/hostbin)

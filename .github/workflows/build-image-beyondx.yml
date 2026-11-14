@@ -1,0 +1,240 @@
+name: Build S10 5G full image
+
+# The whole beyondx image (docs/s10-5g/IMAGE-BUILD.md, step 3):
+#   job 1 (kernel)  BOOT (scripts/build-boot.sh, kernel/beyondx/ci-build.env)
+#                   and every external module from the same kernel tree,
+#                   rild-lite and busybox (scripts/ci-beyondx-extra.sh)
+#   job 2 (rootfs)  scripts/build-beyondx-image.sh --extra <job 1's tree>
+# image/beyondx/ci.env picks the jobs on a push; a tag beyondx-v* builds
+# everything and makes a release. Actions minutes are limited: only the
+# paths below start it.
+#
+# Added for OmonullOS, November 2026.
+
+on:
+  push:
+    branches:
+      - ci-image-beyondx
+    tags:
+      - 'beyondx-v*'
+    paths:
+      - 'image/beyondx/**'
+      - 'scripts/build-beyondx-image.sh'
+      - 'scripts/ci-beyondx-extra.sh'
+      - '.github/workflows/build-image-beyondx.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'full or rootfs (rootfs = job 2 only, --allow-missing)'
+        required: false
+        default: 'full'
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.p.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: image/beyondx
+      - id: p
+        env:
+          IN_MODE: ${{ inputs.mode }}
+        run: |
+          . image/beyondx/ci.env
+          mode=${IN_MODE:-$MODE}
+          case "$GITHUB_REF" in refs/tags/*) mode=full ;; esac
+          case "$mode" in full|rootfs) ;; *) echo "bad mode $mode" >&2; exit 2 ;; esac
+          echo "mode=$mode"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+  kernel:
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Submodules (s9plus, uniLoader)
+        run: git submodule update --init third_party/s9plus third_party/uniLoader
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex cpio kmod libelf-dev libssl-dev python3 wget xz-utils gzip make gcc unzip
+
+      - name: Cache kernel tarball, toolchain, busybox
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/linux-7.1.tar.xz
+            build/linux-sha256sums.asc
+            build/toolchain
+            build/busybox-arm64
+          key: bx-inputs-linux-7.1-gnu-14.2.rel1-v1
+
+      - name: Cache NDK
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: build/ndk
+          key: android-ndk-r27c-linux-v1
+
+      - name: Fetch sources
+        run: |
+          bash scripts/fetch-sources.sh
+          test -d build/linux-7.1
+          test -d build/toolchain/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu
+          test -x build/busybox-arm64
+
+      - name: Fetch NDK r27c (rild-lite)
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p build/ndk
+          wget -q -O build/ndk.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          # sha1 090e8083a715fdb1a3e402d0763c388abb03fb4e as Google lists it for r27c
+          echo "59c2f6dc96743b5daf5d1626684640b20a6bd2b1d85b13156b90333741bad5cc  build/ndk.zip" | sha256sum -c
+          unzip -q build/ndk.zip -d build/ndk
+          rm build/ndk.zip
+
+      - name: BOOT image
+        run: |
+          . kernel/beyondx/ci-build.env
+          case "$NAME" in *[!A-Za-z0-9._-]*|'') echo "bad image name" >&2; exit 2 ;; esac
+          case " $FLAGS " in *" --gpu "*) ;; *) echo "ci-build.env needs --gpu" >&2; exit 2 ;; esac
+          case " $FLAGS " in *" --decon "*) ;; *) echo "ci-build.env needs --decon" >&2; exit 2 ;; esac
+          case " $FLAGS " in *" --wlan "*) ;; *) echo "ci-build.env needs --wlan" >&2; exit 2 ;; esac
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          # FLAGS is a word list on purpose
+          bash scripts/build-boot.sh "$NAME" --device beyondx $FLAGS --cmdline "$CMDLINE"
+          { echo "commit $GITHUB_SHA"; echo "flags --device beyondx $FLAGS"; echo "cmdline $CMDLINE"; } > "out/$NAME.build-info"
+
+      - name: Kernel-side files
+        env:
+          NDK_CC: ${{ github.workspace }}/build/ndk/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang
+        run: |
+          bash scripts/ci-beyondx-extra.sh "$PWD/out/extra"
+          tar -C out/extra -cf out/extra.tar .
+          mv out/extra.sha256 out/extra.tar.sha256-list
+
+      - name: Build logs on failure
+        if: failure()
+        run: |
+          for f in build/kernel-build.log build/uniloader-build.log build/pcie1-build.log build/modem-build.log; do
+            [ -f "$f" ] && { echo "=== $f"; grep -nE 'error|Error|undefined' "$f" | tail -60; tail -n 40 "$f"; }
+          done
+          true
+
+      - name: Upload BOOT
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot
+          path: |
+            out/${{ env.NAME }}.img
+            out/${{ env.NAME }}.build-info
+          retention-days: 14
+
+      - name: Upload kernel-side files
+        uses: actions/upload-artifact@v4
+        with:
+          name: extra
+          path: |
+            out/extra.tar
+            out/extra.tar.sha256-list
+          retention-days: 14
+
+  rootfs:
+    needs: [plan, kernel]
+    if: >-
+      !cancelled() && (needs.kernel.result == 'success' ||
+      (needs.plan.outputs.mode == 'rootfs' && needs.kernel.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Disk space (drop what the runner does not need here)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-user-static binfmt-support libarchive-tools e2fsprogs zstd
+          ls /proc/sys/fs/binfmt_misc/
+
+      - name: Kernel-side files from job 1
+        if: needs.kernel.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: extra
+          path: out
+
+      - name: Root image
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+        run: |
+          args=()
+          if [ "$MODE" = full ]; then
+            mkdir -p extra && tar -C extra -xf out/extra.tar
+            args+=(--extra extra)
+          else
+            args+=(--allow-missing)
+          fi
+          sudo bash scripts/build-beyondx-image.sh "${args[@]}"
+          df -h /
+
+      - name: Pack
+        run: |
+          cd out
+          sudo chown -R "$(id -u):$(id -g)" .
+          e2fsck -fn omonullos-beyondx-root.img | tail -n 2
+          zstd -T0 -12 --rm omonullos-beyondx-root.img
+          sha256sum omonullos-beyondx-root.img.zst > root.sha256
+          ls -l
+
+      - name: Upload root image
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs
+          path: |
+            out/omonullos-beyondx-root.img.zst
+            out/root.sha256
+          retention-days: 14
+
+  release:
+    needs: [kernel, rootfs]
+    if: startsWith(github.ref, 'refs/tags/beyondx-v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir rel
+          cp dl/boot/*.img dl/boot/*.build-info dl/rootfs/*.img.zst rel/
+          (cd rel && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft \
+            --title "OmonullOS beyondx $GITHUB_REF_NAME" \
+            --notes "Galaxy S10 5G (SM-G977N): BOOT image and root filesystem (ext4, label ZR_ARCH, zstd). Firmware is copied from the phone's own VENDOR partition on the first boot. How to install: docs/s10-5g/INSTALL.md. Wipes Android data." \
+            rel/*

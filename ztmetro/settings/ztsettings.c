@@ -186,6 +186,7 @@ enum action {
 	ACT_SYMFONT,		/* arg: 0 the user's seguisym.ttf from a file, 1 download from ztOS */
 	ACT_EMOJI_DOWNLOAD,	/* Apple Color Emoji, downloaded */
 	ACT_MEDIA_DOWNLOAD,	/* ztOS's wallpapers and ringtones, downloaded */
+	ACT_COMMONS_DOWNLOAD,	/* the rest of the Commons wallpapers, downloaded */
 	ACT_ABOUT_REPO,
 	ACT_IB_MODE,		/* arg: 0 off, 1 shadow, 2 on */
 	ACT_IB_ENGINE,		/* arg: 0 the processor, 1 SCORE */
@@ -528,6 +529,25 @@ static char media_note[200];
 static struct font_job media_job = {
 	"ztos-media 2>&1", media_installed, "Downloading the wallpapers and ringtones from ztOS (184 MB)...",
 	"Installed. The new wallpapers and ringtones are in the lists now.", media_note, sizeof(media_note),
+	NULL, "", 0,
+};
+
+/* OmonullOS, November 2026: the Wikimedia Commons wallpapers. The image
+ * ships three; zcommons-walls has zcommons-walls.service fetch the rest
+ * (11 series of 16) from Commons and crop them on the phone. It leaves a
+ * mark when done. Only where the helper is installed. */
+static bool commons_available(void) {
+	return access("/usr/local/bin/zcommons-walls", X_OK) == 0;
+}
+
+static bool commons_installed(void) {
+	return access("/usr/local/share/backgrounds/ztos/.commons", F_OK) == 0;
+}
+
+static char commons_note[200];
+static struct font_job commons_job = {
+	"zcommons-walls 2>&1", commons_installed, "Downloading the wallpapers from Wikimedia Commons...",
+	"Installed. The new wallpapers are in the list now.", commons_note, sizeof(commons_note),
 	NULL, "", 0,
 };
 
@@ -2094,6 +2114,29 @@ static double draw_theme(cairo_t *cr) {
 	zmc_text(cr, "Changing it restarts the shell and closes open apps", FONT_REGULAR, 12, MARGIN, y + 42, zmc.width - 2 * MARGIN);
 	y += 20;
 	y = draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
+
+	/* OmonullOS: the rest of the Commons wallpapers, downloaded on request */
+	if (commons_available() && (!commons_installed() || commons_note[0])) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		if (!commons_installed()) {
+			y += zmc_text(cr, "More wallpapers: 176 photos from Wikimedia Commons (Uzbekistan, mountains, "
+					"lakes, space...). About 180 MB once saved, the download is larger: use Wi-Fi.",
+				FONT_REGULAR, 12, MARGIN, y, zmc.width - 2 * MARGIN) + 12;
+			double btn_w = (zmc.width - 2 * MARGIN - 12) / 2.0;
+			zmc_set_rgb(cr, ACCENTS[app.accent].color);
+			cairo_rectangle(cr, MARGIN, y, btn_w, 36);
+			cairo_fill(cr);
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			zmc_text(cr, "download", FONT_REGULAR, 13, MARGIN + 10, y + 9, btn_w - 20);
+			if (!commons_job.pipe) zmc_add_hit(MARGIN, y, btn_w, 36, ACT_COMMONS_DOWNLOAD, 0);
+			y += 48;
+		}
+		if (commons_note[0]) {
+			cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+			y += zmc_text(cr, commons_note, FONT_REGULAR, 12, MARGIN, y, zmc.width - 2 * MARGIN) + 12;
+		}
+		y += 12;
+	}
 
 	/* OmonullOS: ztOS's own wallpapers and ringtones, downloaded on request */
 	if (!media_installed() || media_note[0]) {
@@ -3683,6 +3726,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_EMOJI_DOWNLOAD:
 		font_job_start(&emoji_job);
+		zmc_redraw();
+		break;
+	case ACT_COMMONS_DOWNLOAD:
+		font_job_start(&commons_job);
 		zmc_redraw();
 		break;
 	case ACT_MEDIA_DOWNLOAD:

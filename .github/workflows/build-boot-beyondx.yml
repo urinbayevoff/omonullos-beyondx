@@ -1,0 +1,111 @@
+name: Build S10 5G boot image
+
+# The PC that built BOOT images burned out (2026-11-03): this builds
+# scripts/build-boot.sh --device beyondx on a GitHub runner instead.
+# A push to ci-boot-beyondx or boot/** builds what kernel/beyondx/ci-build.env
+# asks for; a manual run can override it. The image is an artifact
+# (download: gh run download <id>), flashed from the second device.
+
+on:
+  push:
+    branches:
+      - ci-boot-beyondx
+      - 'boot/**'
+    # only what goes into the image (a log entry is not worth 26 minutes)
+    paths:
+      - 'kernel/**'
+      - 'initramfs/**'
+      - 'firmware/beyondx/**'
+      - 'third_party/s9plus'
+      - 'third_party/uniLoader'
+      - 'scripts/build-boot.sh'
+      - 'scripts/fetch-sources.sh'
+      - '.github/workflows/build-boot-beyondx.yml'
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Image name (out/<name>.img); empty = ci-build.env'
+        required: false
+        default: ''
+      flags:
+        description: 'build-boot.sh flags after --device beyondx; empty = ci-build.env'
+        required: false
+        default: ''
+      cmdline:
+        description: 'Extra kernel command line; empty = ci-build.env'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Submodules (s9plus, uniLoader)
+        run: git submodule update --init third_party/s9plus third_party/uniLoader
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex cpio kmod libelf-dev libssl-dev python3 wget xz-utils gzip make gcc
+
+      - name: Cache kernel tarball, toolchain, busybox
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/linux-7.1.tar.xz
+            build/linux-sha256sums.asc
+            build/toolchain
+            build/busybox-arm64
+          key: bx-inputs-linux-7.1-gnu-14.2.rel1-v1
+
+      - name: Fetch sources
+        run: |
+          bash scripts/fetch-sources.sh
+          test -d build/linux-7.1
+          test -d build/toolchain/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu
+          test -x build/busybox-arm64
+
+      - name: Build
+        env:
+          IN_NAME: ${{ inputs.name }}
+          IN_FLAGS: ${{ inputs.flags }}
+          IN_CMDLINE: ${{ inputs.cmdline }}
+        run: |
+          . kernel/beyondx/ci-build.env
+          NAME=${IN_NAME:-$NAME}
+          FLAGS=${IN_FLAGS:-$FLAGS}
+          CMDLINE=${IN_CMDLINE:-$CMDLINE}
+          case "$NAME" in *[!A-Za-z0-9._-]*|'') echo "bad image name" >&2; exit 2 ;; esac
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          echo "build-boot.sh $NAME --device beyondx $FLAGS --cmdline \"$CMDLINE\""
+          # FLAGS is a word list on purpose
+          bash scripts/build-boot.sh "$NAME" --device beyondx $FLAGS --cmdline "$CMDLINE"
+          { echo "commit $GITHUB_SHA"; echo "flags --device beyondx $FLAGS"; echo "cmdline $CMDLINE"; } > "out/$NAME.build-info"
+
+      - name: Build log on failure
+        if: failure()
+        run: |
+          for f in build/kernel-build.log build/uniloader-build.log; do
+            [ -f "$f" ] && { echo "=== $f"; grep -nE 'error|Error|undefined' "$f" | tail -60; tail -n 40 "$f"; }
+          done
+          true
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            out/${{ env.NAME }}.*
+            build/kernel-build.log
+          retention-days: 30
