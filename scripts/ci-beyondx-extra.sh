@@ -38,6 +38,8 @@ say "reboot"
 bash "$ROOT/power/reboot/beyondx/build.sh"
 say "cpuidle"
 bash "$ROOT/power/idle/beyondx/build.sh"
+say "system sleep"
+bash "$ROOT/power/suspend/beyondx/build.sh"
 say "lastlog"
 rm -rf "$B/lastlog"; cp -r "$ROOT/power/suspend/lastlog" "$B/lastlog"
 make -s -C "$K" O=out-beyondx M="$B/lastlog" ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- modules
@@ -52,6 +54,7 @@ put() { install -m644 "$1" "$2/"; }
 for m in "$B"/gpu-modules/*.ko "$B"/decon-modules/*.ko; do put "$m" "$Z/modules"; done
 put "$B/zrn-modem.ko" "$Z"; put "$B/zrn_drb.ko" "$Z"; put "$B/pcie-exynos9820-ch1.ko" "$Z"
 put "$B/abox-bx/out/snd-zrn-abox-bx.ko" "$Z/tools"
+put "$B/sleep-bx/zrn-system-sleep-bx.ko" "$Z/tools"	# zsleepd
 for m in "$B"/wlan-modules/*.ko "$B/reboot-bx/zreboot-bx.ko" "$B/idle-bx/zrn-cpuidle-bx.ko" \
 		"$B/lastlog/zrn-lastlog.ko"; do
 	put "$m" "$X"

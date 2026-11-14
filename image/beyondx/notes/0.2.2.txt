@@ -1,0 +1,3 @@
+• Avtomatik uyqu: ekran öçgandan keyin telefon tizim uyqusiga ketadi (batareya ancha kam sarflanadi). SMS va qöňğiroq uni uyğotadi.
+• Karnay kalibrovkasi: bir marta «sudo zspk-calibrate» işga tuşiriladi (12 soniya jimjitlik), şundan keyin karnay himoyasi özi yoqiladi.
+• Telefonni qayta yoqing.

@@ -203,6 +203,10 @@ done
 install -m755 "$K/zacpm.py" "$R/usr/local/bin/zacpm"
 install -m755 "$K/zgov.py" "$R/usr/local/bin/zgov"
 install -m755 "$K/gnome-terminal" "$R/usr/local/bin/gnome-terminal"
+# automatic system sleep (enabled by the overlay's relative link) and the
+# speaker's one-time calibration
+install -m755 "$SRC/scripts/zsleepd.sh" "$R/usr/local/bin/zsleepd"
+install -m755 "$SRC/audio/beyondx/zspk-calibrate.sh" "$R/usr/local/bin/zspk-calibrate"
 install -Dm644 "$K/wdt-pet.sh" "$R/usr/local/lib/zboot/wdt-pet.sh"
 # sound: zaudio.service with the VSS drop-in, as on the phone
 U=$K/zfield-units
