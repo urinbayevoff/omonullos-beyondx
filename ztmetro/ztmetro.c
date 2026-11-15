@@ -599,6 +599,7 @@ enum key_action {
 	ACT_SHIFT, ACT_PAGE, ACT_CTRL, ACT_ALT, ACT_EMOJI,
 	ACT_PASTE,	/* OmonullOS: ctrl+v, ctrl+shift+v in a terminal */
 	ACT_HIDE,	/* OmonullOS: the keyboard goes down (as iPad's and Android's) */
+	ACT_PAGE2,	/* OmonullOS: the symbols' second page (| < > [ ] { } ...) and back */
 };
 
 struct osk_key {
@@ -1067,6 +1068,7 @@ struct zt_server {
 	bool osk_visible;
 	bool osk_terminal;		/* extra row for terminals */
 	bool osk_symbols;
+	bool osk_symbols2;		/* OmonullOS: the second symbols page */
 	bool osk_emoji;
 	int key_height;
 	bool key_sound;
@@ -7545,9 +7547,22 @@ static void osk_layout(struct zt_server *server) {
 	static const struct osk_key s2[] = { KS("@", KEY_2), KS("#", KEY_3), KS("$", KEY_4),
 		KS("%", KEY_5), KS("&", KEY_7), KS("*", KEY_8), K("-", KEY_MINUS),
 		KS("+", KEY_EQUAL), KS("(", KEY_9), KS(")", KEY_0) };
-	static const struct osk_key s3[] = { KS("!", KEY_1), KS("\"", KEY_APOSTROPHE),
+	/* OmonullOS, November 2026: «=\<» opens a second page with what the first
+	 * has no room for (| < > [ ] { } \ ~ ` ^), as Gboard's; «=» moved there */
+	static const struct osk_key s3[] = {
+		{ "=\\<", NULL, 0, false, ACT_PAGE2, 1.5 },
+		KS("!", KEY_1), KS("\"", KEY_APOSTROPHE),
 		K("'", KEY_APOSTROPHE), KS(":", KEY_SEMICOLON), K(";", KEY_SEMICOLON),
-		K("/", KEY_SLASH), KS("?", KEY_SLASH), KS("_", KEY_MINUS), K("=", KEY_EQUAL),
+		K("/", KEY_SLASH), KS("?", KEY_SLASH), KS("_", KEY_MINUS),
+		KBACKSPACE };
+	static const struct osk_key t2[] = { KS("~", KEY_GRAVE), K("`", KEY_GRAVE),
+		KS("|", KEY_BACKSLASH), K("\\", KEY_BACKSLASH), KS("<", KEY_COMMA),
+		KS(">", KEY_DOT), KS("{", KEY_LEFTBRACE), KS("}", KEY_RIGHTBRACE),
+		K("[", KEY_LEFTBRACE), K("]", KEY_RIGHTBRACE) };
+	static const struct osk_key t3[] = {
+		{ "?123", NULL, 0, false, ACT_PAGE2, 1.5 },
+		KS("^", KEY_6), K("=", KEY_EQUAL), KS("+", KEY_EQUAL), K("-", KEY_MINUS),
+		KS("*", KEY_8), K("/", KEY_SLASH), KS("%", KEY_5), KS("_", KEY_MINUS),
 		KBACKSPACE };
 	static const struct osk_key bottom_letters[] = {
         /* OmonullOS: 10 columns; a wide space, so the thumb does not land on «.»
@@ -7589,8 +7604,13 @@ static void osk_layout(struct zt_server *server) {
         osk_row(server, controls, 4, y + 3 * server->key_height, server->key_height, 0);
     } else if (server->osk_symbols) {
         osk_row(server, s1, 10, y, server->key_height, 0);
-		osk_row(server, s2, 10, y + server->key_height, server->key_height, 0);
-		osk_row(server, s3, 10, y + 2 * server->key_height, server->key_height, 0);
+		if (server->osk_symbols2) {
+			osk_row(server, t2, 10, y + server->key_height, server->key_height, 0);
+			osk_row(server, t3, 10, y + 2 * server->key_height, server->key_height, 0);
+		} else {
+			osk_row(server, s2, 10, y + server->key_height, server->key_height, 0);
+			osk_row(server, s3, 10, y + 2 * server->key_height, server->key_height, 0);
+		}
 		osk_grid_row(server, bottom_symbols, 7, y + 3 * server->key_height);
 	} else {
 		osk_row(server, l1, 10, y, server->key_height, 0);
@@ -7938,6 +7958,7 @@ static void osk_show(struct zt_server *server, bool visible) {
 	} else {
 		server->osk_shift = server->osk_ctrl = server->osk_alt = false;
 		server->osk_symbols = false;
+		server->osk_symbols2 = false;
 		server->osk_emoji = false;
 		server->key_prefix[0] = 0;
 	}
@@ -9453,6 +9474,12 @@ static void osk_activate(struct zt_server *server, int index) {
 	case ACT_PAGE:
 		server->osk_emoji = false;
 		server->osk_symbols = !server->osk_symbols;
+		server->osk_symbols2 = false;
+		server->osk_shift = false;
+		osk_layout(server);
+		break;
+	case ACT_PAGE2:
+		server->osk_symbols2 = !server->osk_symbols2;
 		server->osk_shift = false;
 		osk_layout(server);
 		break;
@@ -16338,6 +16365,15 @@ static int render_to_files(struct zt_server *server, const char *dir) {
     server->osk_trackpad = true;
     draw_osk(server);
     server->osk_trackpad = false;
+    g_dump_name = "keyboard-symbols";
+    server->osk_symbols = true;
+    osk_layout(server);
+    draw_osk(server);
+    g_dump_name = "keyboard-symbols2";
+    server->osk_symbols2 = true;
+    osk_layout(server);
+    draw_osk(server);
+    server->osk_symbols = server->osk_symbols2 = false;
     g_dump_name = "keyboard-terminal";
     server->osk_terminal = true;
     osk_layout(server);

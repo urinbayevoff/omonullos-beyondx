@@ -104,6 +104,24 @@ python3 "$UPD" rollback || fail "rollback: $(cat run/status.json)"
 grep -q '"version": "0.1"' phone/var/lib/omonullos-update/installed.json || fail "rollback version"
 ok "rollback: back to 0.1, created files gone"
 
+# GitHub's API fails (0.2-0.2.2's 415, the rate limit): the latest release's
+# own files are the way in, the signature is checked the same way
+mkdir -p web/o/r/releases/latest/download web/o/r/releases/download
+cp -r rel/beyondx-v0.2 web/o/r/releases/download/
+cp rel/beyondx-v0.2/manifest.json rel/beyondx-v0.2/manifest.json.sig web/o/r/releases/latest/download/
+echo "source=github:o/r" > conf
+OMONULLOS_UPDATE_GITHUB_API="file://$W/no-api" OMONULLOS_UPDATE_GITHUB_WEB="file://$W/web" python3 "$UPD" check --quiet
+[ "$(st)" = available ] || fail "API down: expected available by the latest release, got $(st)"
+grep -q "GitHub API failed" log || fail "the API failure is not in the log"
+OMONULLOS_UPDATE_GITHUB_API="file://$W/no-api" OMONULLOS_UPDATE_GITHUB_WEB="file://$W/web" python3 "$UPD" apply ||
+	fail "apply by the latest release: $(cat run/status.json)"
+[ "$(phone/usr/local/bin/ztmetro)" = "ztmetro 0.2" ] || fail "ztmetro not updated by the latest release"
+OMONULLOS_UPDATE_GITHUB_API="file://$W/no-api" OMONULLOS_UPDATE_GITHUB_WEB="file://$W/no-web" python3 "$UPD" check --quiet || true
+[ "$(st)" = failed ] || fail "both ways down: expected failed, got $(st)"
+python3 "$UPD" rollback >/dev/null || fail "rollback after the latest-release apply"
+echo "source=dir:$W/rel" > conf
+ok "GitHub API down: found, checked and installed by the latest release's files"
+
 # a signature by some other key: refused, nothing offered
 cp rel/beyondx-v0.2/manifest.json.sig good.sig
 openssl pkeyutl -sign -inkey other.pem -rawin -in rel/beyondx-v0.2/manifest.json -out rel/beyondx-v0.2/manifest.json.sig

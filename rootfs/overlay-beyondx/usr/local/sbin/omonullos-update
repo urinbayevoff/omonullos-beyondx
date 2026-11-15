@@ -46,7 +46,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import re
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 UPDATER_VERSION = 2        # what this updater can install (manifest "min_updater")
@@ -58,6 +61,11 @@ RUN = os.environ.get("OMONULLOS_UPDATE_RUN", "/run/omonullos-update")
 VAR = os.environ.get("OMONULLOS_UPDATE_VAR", "/var/lib/omonullos-update")
 LOG = os.environ.get("OMONULLOS_UPDATE_LOG", "/var/log/omonullos-update.log")
 KEYS = "/usr/local/share/omonullos/ota-keys"     # *.pem, any one may sign
+# GitHub: the API lists the releases; if it fails (0.2-0.2.2's 415, the rate
+# limit, an API change) the newest release's own files on github.com are the
+# way in (a plain download, as a browser's). Tests point both elsewhere.
+GITHUB_API = os.environ.get("OMONULLOS_UPDATE_GITHUB_API", "https://api.github.com")
+GITHUB_WEB = os.environ.get("OMONULLOS_UPDATE_GITHUB_WEB", "https://github.com")
 
 # where an update may write (relative to /), and what it never may
 ALLOWED_V1 = ("usr/local/bin/", "usr/local/sbin/", "usr/local/share/", "usr/local/lib/ztos-sdk/",
@@ -319,13 +327,37 @@ def releases(conf):
         return out
     if src.startswith("github:"):
         repo = src[7:]
-        data = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=15", limit=4 << 20,
-                                accept="application/vnd.github+json"))
+        try:
+            data = json.loads(fetch(f"{GITHUB_API}/repos/{repo}/releases?per_page=15", limit=4 << 20,
+                                    accept="application/vnd.github+json"))
+        except Exception as e:  # noqa: BLE001 - any failure: the other way
+            log("GitHub API failed:", repr(e), "- the latest release's files instead")
+            try:
+                return latest_release(repo)
+            except Exception as e2:
+                raise RuntimeError(f"GitHub API: {e}; latest release: {e2}") from e2
         # drafts are not offered (a release is a draft until the owner signs
         # it); pre-releases are: beyondx is all beta for now
         return [(r["tag_name"], {a["name"]: a["browser_download_url"] for a in r.get("assets", [])})
                 for r in data if not r.get("draft")]
     raise ValueError(f"unknown source {src}")
+
+
+def latest_release(repo):
+    """The newest published release without the API: its manifest names its
+    tag and package files; the signature is checked later as for any other.
+    A bridge release (min_updater) older than the newest is not seen here."""
+    m = json.loads(fetch(f"{GITHUB_WEB}/{repo}/releases/latest/download/manifest.json", limit=8 << 20))
+    tag = m.get("tag") if isinstance(m, dict) else None
+    if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", tag):
+        raise ValueError("latest release: no tag in its manifest")
+    names = ["manifest.json", "manifest.json.sig"]
+    for k in ("package", "delta"):
+        p = m.get(k)
+        if isinstance(p, dict) and isinstance(p.get("name"), str):
+            names.append(p["name"])
+    base = f"{GITHUB_WEB}/{repo}/releases/download/{urllib.parse.quote(tag)}/"
+    return [(tag, {n: base + urllib.parse.quote(n) for n in names})]
 
 
 def verify_sig(manifest_path, sig_path):
@@ -436,6 +468,19 @@ def find_update(conf, work):
 
 # ---------------------------------------------------------------- commands
 
+def check_fails(step):
+    """Checks that failed in a row (+1 one more, 0 a good one): the Updates
+    app says more when it keeps failing."""
+    path = os.path.join(VAR, "check-fails.json")
+    n = 0 if step == 0 else int((read_json(path) or {}).get("n", 0)) + 1
+    try:
+        os.makedirs(VAR, exist_ok=True)
+        write_json(path, {"n": n})
+    except OSError:
+        pass
+    return n
+
+
 def cmd_check(quiet=False):
     status("checking")
     log("== check")
@@ -444,8 +489,16 @@ def cmd_check(quiet=False):
             m, why = find_update(config(), work)
         except Exception as e:  # network, GitHub, keys
             log("check failed:", repr(e))
-            status("failed", msg=f"check: {e}")
+            fails = check_fails(+1)
+            # what the Updates app says: no internet, or GitHub said no
+            http = next((x for x in (e, e.__cause__, e.__context__)
+                         if isinstance(x, urllib.error.HTTPError)), None)
+            net = any(isinstance(x, (urllib.error.URLError, OSError)) for x in (e, e.__cause__, e.__context__))
+            kind = "server" if http else "offline" if net else "other"
+            more = {"code": http.code} if http else {}
+            status("failed", msg=f"check: {e}", what="check", kind=kind, fails=fails, **more)
             return 1
+        check_fails(0)
         avail = os.path.join(VAR, "available.json")
         if m is None:
             if os.path.exists(avail):

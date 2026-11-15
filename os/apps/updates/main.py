@@ -79,6 +79,22 @@ O_TEXT = {
 }
 
 
+def check_failed_text(s):
+    """A check that failed, in plain words (the updater says which kind)."""
+    kind = s.get("kind")
+    if kind == "offline":
+        text = "Internetga ulanib bölmadi. Wi-Fi yoki mobil internetni tekşirib, qayta urinib köring."
+    elif kind == "server":
+        text = f"GitHub yangilanişlar röyxatini bermadi (xato {s.get('code', '?')}). Birozdan keyin qayta urinib köring."
+    else:
+        text = "Yangilanişni tekşirib bölmadi: " + s.get("msg", "")
+    if int(s.get("fails", 0) or 0) >= 3:
+        text += (f"\n{s['fails']} marta ketma-ket bölmadi. Internet bor bölsa ham davom etsa, "
+                 "github.com/urinbayevoff/omonullos-beyondx sahifasida yangi versiyani qarang. "
+                 "Batafsil: /var/log/omonullos-update.log")
+    return text
+
+
 class Home(ztos.Page):
     def __init__(self):
         super().__init__("yangilanişlar")
@@ -172,6 +188,7 @@ class Home(ztos.Page):
         hv = have.get("version", "0")
         self.version.setText("Örnatilgan versiya: " + (hv if hv != "0" else "nomaʼlum"))
         self.check_entry.setVisible(not working)
+        self.check_entry.set_detail("qayta urinib köriş" if st == "failed" else "hozir qarab çiqiş")
         can_install = bool(avail) and not avail.get("_needs_updater") and not working and st != "done"
         self.install_entry.setVisible(can_install)
         if avail:
@@ -205,6 +222,8 @@ class Home(ztos.Page):
             if s.get("kept"):
                 text += ("\nSiz özgartirgan fayllarga tegilmadi, yangisi yonida .new: "
                          + ", ".join("/" + k for k in s["kept"]))
+        elif st == "failed" and s.get("what") == "check":
+            text = check_failed_text(s)
         elif st == "failed":
             text = "Bölmadi: " + s.get("msg", "") + "\nBatafsil: /var/log/omonullos-update.log"
         elif st == "rolled-back" and s.get("auto"):

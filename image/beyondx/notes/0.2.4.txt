@@ -1,0 +1,4 @@
+• Klaviatura: belgilar sahifasidagi «=\<» tugmasi ikkinçi sahifani oçadi: | < > [ ] { } \ ~ ` ^ va boşqalar.
+• Yangilanişlar: GitHub röyxati işlamasa, yangilaniş eng oxirgi relizdan töğridan-töğri olinadi (imzo tekşiruvi özgarmaydi).
+• Yangilanişni tekşirib bölmasa, sababi tuşunarli yoziladi (internet yöq yoki GitHub javob bermadi) va «qayta urinib köriş» çiqadi.
+• Telefonni qayta yoqing.

@@ -233,6 +233,12 @@ jobs:
             echo "$t: manifest signature not good, not a base" >&2
           done
 
+      - name: The updater talks to the real GitHub (a tag only)
+        if: startsWith(github.ref, 'refs/tags/beyondx-v')
+        # both ways (the API, the latest release's files); 0.2-0.2.2 went out
+        # with an updater that could never check (the API answered 415)
+        run: sh scripts/ota-github-check.sh "$GITHUB_REPOSITORY"
+
       - name: Root image
         env:
           MODE: ${{ needs.plan.outputs.mode }}
