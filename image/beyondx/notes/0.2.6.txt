@@ -1,0 +1,3 @@
+0.2.5 ning kiçik tuzatişlari:
+• Avtomatik uyqu: telefon yoqilganda tarmoq uzoq kutilsa, uyqu xizmati bir marta yiqilib, bir daqiqadan keyin qayta işga tuşardi. Endi kerakli modul yuklanişini özi kutadi.
+• Telefonni qayta yoqing.

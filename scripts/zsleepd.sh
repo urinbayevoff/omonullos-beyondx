@@ -42,6 +42,12 @@ else
 	insmod "$KO" enable_deep=1 suspend_enter=0x"$SUS" resume=0x"$RES" || { say "insmod $KO failed"; exit 1; }
 	say "insmod enable_deep=1"
 fi
+# zrn-cpuidle.service loads it after multi-user.target, which can come late
+# (15.11: network-online waited 100 s, the module came 12 s after the 90 s
+# wait; zsleepd.service is not ordered after it, see the unit): wait for it
+n=0
+while [ ! -e $IP/hotplug ] && [ $n -lt 300 ]; do sleep 2; n=$((n + 2)); done
+[ $n -eq 0 ] || say "waited ${n} s for zrn-cpuidle-bx"
 echo 0x$(awk '$3=="psci_ops"{print $1}' /proc/kallsyms) > $IP/psci_ops
 echo 0x$(awk '$3=="psci_0_2_cpu_off"{print $1}' /proc/kallsyms) > $IP/psci_cpu_off
 echo 1 > $IP/hotplug && echo 1 > $IP/hp_cluster || { say "no hotplug/hp_cluster in zrn-cpuidle-bx"; exit 1; }
