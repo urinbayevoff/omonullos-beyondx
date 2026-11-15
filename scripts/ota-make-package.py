@@ -72,8 +72,21 @@ def usable(upd, rel, compat):
         return False
 
 
+def in_root(root, p):
+    """p with every link resolved, which must stay inside root."""
+    real = os.path.realpath(p)
+    if os.path.commonpath([real, os.path.realpath(root)]) != os.path.realpath(root):
+        sys.exit(f"{p}: leads out of the root ({real})")
+    return real
+
+
 def collect(upd, root, overlays, compat):
     rels = set()
+    # an overlay's regular file that the root has as a link (Arch's etc/os-release
+    # -> ../usr/lib/os-release; the overlay's copy went through the link): the
+    # file goes out, not the link (0.2-0.2.4 shipped the link, and a phone whose
+    # usr/lib/os-release is Arch's got Arch's name)
+    as_file = set()
     for prefix in (upd.ALLOWED_V1 if compat == 1 else upd.ALLOWED):
         if prefix == "etc/":
             continue
@@ -89,11 +102,17 @@ def collect(upd, root, overlays, compat):
                 rel = os.path.relpath(os.path.join(d, name), ov)
                 if os.path.lexists(os.path.join(root, rel)):
                     rels.add(rel)
+                    if not os.path.islink(os.path.join(d, name)):
+                        as_file.add(rel)
     out = []
     for rel in sorted(rels):
         if rel.endswith(SKIP_SUFFIX) or not usable(upd, rel, compat):
             continue
         p = os.path.join(root, rel)
+        if os.path.islink(p) and rel in as_file:
+            p = in_root(root, p)
+            if not os.path.isfile(p):
+                sys.exit(f"{rel}: a link in the root to no file, a file in the overlay")
         if os.path.islink(p):
             target = os.readlink(p)
             if os.path.basename(target) == "busybox-zboot":
@@ -116,6 +135,8 @@ def pack(root, files, out):
     with tarfile.open(tar, "w", format=tarfile.PAX_FORMAT) as t:
         for e in files:
             p = os.path.join(root, e["path"])
+            if e.get("type", "file") == "file" and os.path.islink(p):
+                p = in_root(root, p)  # an overlay file the root has as a link (collect)
             ti = t.gettarinfo(p, arcname=e["path"])
             ti.uid = ti.gid = 0
             ti.uname = ti.gname = "root"

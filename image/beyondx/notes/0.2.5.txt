@@ -1,0 +1,2 @@
+• Tizim nomi: yangilaniş /etc/os-release faylini endi havola emas, faylning özi qilib qöyadi. Eski usulda örnatilgan telefonlarda yangilanişdan keyin tizim nomi «Arch Linux ARM» bölib qolardi.
+• Telefonni qayta yoqing.

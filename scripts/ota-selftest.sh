@@ -289,4 +289,19 @@ python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); sys.exit(1 if m["re
 	fail "a module left out of a release is removed from the phone"
 ok "modules left out of a release stay on the phone (not removed)"
 
+# an overlay file the root has as a link (etc/os-release -> ../usr/lib/os-release,
+# the overlay's copy went through it): the package has the file, not the link
+rm -rf r5 ov5; cp -a r1 r5; mkdir -p r5/usr/lib ov5/etc
+echo "NAME=omonullOS" > r5/usr/lib/os-release; ln -s ../usr/lib/os-release r5/etc/os-release
+echo "NAME=omonullOS" > ov5/etc/os-release
+python3 "$MK" --root r5 --version 0.4 --tag beyondx-v0.4 --notes notes --out out0.4 --overlay ov5 >/dev/null ||
+	fail "package with an overlay file behind a link"
+python3 -c '
+import json, sys
+e = {f["path"]: f for f in json.load(open(sys.argv[1]))["files"]}["etc/os-release"]
+sys.exit(0 if e.get("type", "file") == "file" and e["size"] == 15 else 1)' out0.4/manifest.json ||
+	fail "etc/os-release went out as a link"
+[ "$(tar --zstd -xOf out0.4/update-0.4.tar.zst etc/os-release)" = "NAME=omonullOS" ] || fail "os-release content"
+ok "an overlay file the root has as a link goes out as the file (os-release)"
+
 echo "all $pass passed ($W)"
