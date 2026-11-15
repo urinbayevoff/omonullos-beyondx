@@ -145,13 +145,15 @@ def main():
     ap.add_argument("--kernel-config", help="the kernel's .config (needed when modules are in)")
     ap.add_argument("--kernel-files", default="",
                     help="space-separated globs: only these module files go in (the rest of the root's "
-                         "modules stay as the phone has them)")
+                         "modules stay as the phone has them); none by default, 'all' for every one "
+                         "(0.2.3's first draft took all 25 by the old default: never again by accident)")
     a = ap.parse_args()
 
     upd = load_updater()
     overlays = a.overlay or [os.path.join(TREE, o) for o in OVERLAYS]
     files = collect(upd, a.root, overlays, a.compat)
-    if a.kernel_files:
+    in_root = {e["path"] for e in files}
+    if a.kernel_files.strip() != "all":
         import fnmatch
         pats = a.kernel_files.split()
         files = [e for e in files if not upd.kernel_side(e["path"])
@@ -171,8 +173,9 @@ def main():
                for e in base["files"]}
         changed = [e for e in files
                    if old.get(e["path"]) != (e.get("type", "file"), e.get("sha256"), e.get("target"), e.get("mode"))]
-        now = {e["path"] for e in files}
-        remove = sorted(p for p in old if p not in now)
+        # only what is gone from the root: a module left out of this release
+        # stays on the phone as it is
+        remove = sorted(p for p in old if p not in in_root)
         dname = f"update-{base['version']}-to-{a.version}.tar.zst"
         dpkg = os.path.join(a.out, dname)
         pack(a.root, changed, dpkg)

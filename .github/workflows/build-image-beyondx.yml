@@ -206,11 +206,13 @@ jobs:
             [ ! -f out/kernel.config ] || echo "OTA_KCONFIG=$PWD/out/kernel.config"
             # image/beyondx/ota/VERSION.env: COMPAT=1 (a bridge release for
             # updater 1), KERNEL_FILES="globs" (the modules that go in)
-            if [ -f "image/beyondx/ota/$v.env" ]; then
-              . "image/beyondx/ota/$v.env"
-              echo "OTA_COMPAT=${COMPAT:-0}"
-              echo "OTA_KERNEL_FILES=${KERNEL_FILES:-}"
-            fi
+            # it must be there: which modules go in is never a default (0.2.3's
+            # first draft had none and took all 25 rebuilt modules)
+            test -f "image/beyondx/ota/$v.env" || {
+              echo "no image/beyondx/ota/$v.env (KERNEL_FILES: the modules that go in; empty: none)" >&2; exit 2; }
+            . "image/beyondx/ota/$v.env"
+            echo "OTA_COMPAT=${COMPAT:-0}"
+            echo "OTA_KERNEL_FILES=${KERNEL_FILES:-}"
           } >> "$GITHUB_ENV"
           # the delta's base: the newest published release whose manifest the
           # owner signed (checked here with the keys in the tree)

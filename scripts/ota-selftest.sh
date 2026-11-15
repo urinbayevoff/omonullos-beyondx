@@ -209,12 +209,15 @@ chmod 755 r4/usr/local/lib/zboot/tools/zaudio-load.sh
 python3 "$MK" --root r4 --version 0.2.5 --tag beyondx-v0.2.5 --notes notes --out outb --overlay ov --compat 1 >/dev/null
 grep -q 'zboot\|modules' outb/manifest.json && fail "a bridge release took zboot or modules"
 grep -q '"min_updater": 1' outb/manifest.json || fail "a bridge release is not min_updater 1"
-python3 "$MK" --root r4 --version 0.2.5 --tag beyondx-v0.2.5 --notes notes --out outx --overlay ov 2>/dev/null &&
-	fail "modules packed without --kernel-config"
-ok "a bridge release (--compat 1) leaves modules and zboot out; modules need --kernel-config"
+python3 "$MK" --root r4 --version 0.2.5 --tag beyondx-v0.2.5 --notes notes --out outx --overlay ov \
+	--kernel-files all 2>/dev/null && fail "modules packed without --kernel-config"
+python3 "$MK" --root r4 --version 0.2.5 --tag beyondx-v0.2.5 --notes notes --out outn --overlay ov >/dev/null ||
+	fail "no --kernel-files: should pack without modules"
+grep -q 'usr/lib/modules\|zsleep.ko' outn/manifest.json && fail "modules went in without --kernel-files"
+ok "a bridge release (--compat 1) leaves modules and zboot out; modules only when asked, and need --kernel-config"
 
 python3 "$MK" --root r4 --version 0.3.0 --tag beyondx-v0.3.0 --notes notes --out out0.3.0 --overlay ov \
-	--kernel-config kconf --base out0.2.1/manifest.json >/dev/null
+	--kernel-config kconf --kernel-files all --base out0.2.1/manifest.json >/dev/null
 grep -q '"min_updater": 2' out0.3.0/manifest.json || fail "a module release is not min_updater 2"
 grep -q '"release": "7.1.0-zboot"' out0.3.0/manifest.json || fail "no kernel in the manifest"
 signrel 0.3.0
@@ -260,5 +263,12 @@ python3 "$UPD" check --quiet && python3 "$UPD" apply 2>/dev/null && fail "a modu
 [ ! -e phone/usr/local/lib/zboot/tools/zsleep.ko ] || fail "vermagic refusal left a module"
 grep -q "vermagic of" log || fail "no vermagic refusal in the log"
 ok "a module whose vermagic is not the manifest's is refused"
+
+# the next release without modules: what 0.3.0 put stays (not in "remove")
+python3 "$MK" --root r4 --version 0.3.1 --tag beyondx-v0.3.1 --notes notes --out out0.3.1 --overlay ov \
+	--base out0.3.0/manifest.json >/dev/null || fail "0.3.1 without modules"
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); sys.exit(1 if m["remove"] else 0)' out0.3.1/manifest.json ||
+	fail "a module left out of a release is removed from the phone"
+ok "modules left out of a release stay on the phone (not removed)"
 
 echo "all $pass passed ($W)"
