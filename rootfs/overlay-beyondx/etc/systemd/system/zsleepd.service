@@ -2,12 +2,18 @@
 Description=Automatic system sleep once the screen is off (zsleepd, beyondx)
 # OmonullOS, November 2026: scripts/zsleepd.sh as /usr/local/bin/zsleepd.
 # Off switch: touch /etc/zsleepd.off (looked at every few seconds).
-After=zrn-cpuidle.service zaudio.service zmodem.service zwlan.service ztouch.service
+# not After=zrn-cpuidle: that one is After=multi-user.target, and 0.2.2 left a
+# multi-user.target.wants link here (its updater keeps links) = an ordering
+# cycle; the 90 s wait below is the ordering that matters
+After=zaudio.service zmodem.service zwlan.service ztouch.service
 Wants=zrn-cpuidle.service
 ConditionPathExists=!/etc/zsleepd.off
 
 [Service]
 Type=simple
+# the 90 s wait is longer than the default start timeout (90 s): it was
+# killed and restarted forever (15.11, after a restart; at boot it won by ms)
+TimeoutStartSec=3min
 # let the boot settle (modem, Wi-Fi, the shell) before the first sleep
 ExecStartPre=/bin/sleep 90
 ExecStart=/usr/local/bin/zsleepd

@@ -1,0 +1,5 @@
+• Zaryadlaş: telefon zaryadlovçiga ulanganda endi uyquga ketmaydi, şuning uçun ekran öçiq bölsa ham zaryadlanadi.
+• Ekran taymauti «Heç qaçon» endi qayta yoqilgandan keyin ham saqlanib qoladi.
+• Yangilanişlar ilovasi: GitHub'dan yangilaniş tekşiriş xatosi (415) tuzatildi.
+• Avtomatik uyqu xizmati işga tuşişda qayta-qayta öçib yonmaydi.
+• Telefonni qayta yoqing.

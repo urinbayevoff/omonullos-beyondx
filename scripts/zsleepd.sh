@@ -4,7 +4,7 @@
 # WIFI_UNBIND=1 HOTPLUG=1, in a loop: once the screen has been off for DELAY s
 # (RESLEEP s after a wake that left it off: an SMS), with no call, no sound, no
 # USB cable and nothing busy, the phone goes to sleep; the power key, a call or
-# an SMS (CP, wake bit 8) wakes it. Tested by hand 14.11 (three 4c runs, amps
+# an SMS (CP, wake bit 8) wakes it. Never on a charger (see busy). Tested by hand 14.11 (three 4c runs, amps
 # set up again by snd-zrn-abox-bx, zcell lights the screen for a call).
 # No timer wakes it: alarms and timers do not run while it sleeps (owner: none needed).
 # Off switch: /etc/zsleepd.off (looked at every check). Log: /var/lib/zsleep/zsleepd.log,
@@ -66,6 +66,11 @@ busy() {
 	grep -qs RUNNING /proc/asound/card*/pcm*/sub*/status && { echo "sound"; return; }
 	local u; u=$(cat /sys/class/udc/*/state 2>/dev/null | head -1)
 	[ -n "$u" ] && [ "$u" != "not attached" ] && { echo "usb $u"; return; }
+	# a charger: the MAX77705's charger watchdog is kicked only while awake
+	# (wdt-pet.sh, every 20 s); asleep it runs out and charging stops (owner
+	# 15.11: asleep on the charger, no charge). zlowbatt writes /run/zbatt/online
+	# (CHGIN valid) every 10 s.
+	[ "$(cat /run/zbatt/online 2>/dev/null)" = 1 ] && { echo "charger"; return; }
 	pgrep -x pacman >/dev/null && { echo "pacman"; return; }
 	pgrep -f zsleep-4a.sh >/dev/null && { echo "zsleep-4a"; return; }
 	systemctl -q is-active zfield-push.service && { echo "zfield push"; return; }

@@ -880,7 +880,9 @@ static void config_load(void) {
 			app.dev_lock = strcmp(val, "off") != 0;
 		} else if (strcmp(key, "timeout") == 0) {
 			int t = atoi(val);
-			if (t <= 30) app.timeout_idx = 0;
+			/* 0 = never (timeouts[4]); it read back as 30 s and the next save wrote 30 */
+			if (t <= 0) app.timeout_idx = 4;
+			else if (t <= 30) app.timeout_idx = 0;
 			else if (t <= 60) app.timeout_idx = 1;
 			else if (t <= 180) app.timeout_idx = 2;
 			else if (t <= 300) app.timeout_idx = 3;

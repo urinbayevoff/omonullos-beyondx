@@ -283,9 +283,12 @@ def safe_parent(rel):
 
 # ---------------------------------------------------------------- the release
 
-def fetch(url, dest=None, limit=64 << 20):
+def fetch(url, dest=None, limit=64 << 20, accept="*/*"):
+    # GitHub's API answers 415 to "Accept: application/octet-stream" on a JSON
+    # endpoint (15.11: every check failed); assets come by browser_download_url
+    # and are fine with */*
     req = urllib.request.Request(url, headers={"User-Agent": "omonullos-update",
-                                               "Accept": "application/octet-stream"})
+                                               "Accept": accept})
     with urllib.request.urlopen(req, timeout=60) as r:
         if dest is None:
             data = r.read(limit + 1)
@@ -316,7 +319,8 @@ def releases(conf):
         return out
     if src.startswith("github:"):
         repo = src[7:]
-        data = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=15", limit=4 << 20))
+        data = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=15", limit=4 << 20,
+                                accept="application/vnd.github+json"))
         # drafts are not offered (a release is a draft until the owner signs
         # it); pre-releases are: beyondx is all beta for now
         return [(r["tag_name"], {a["name"]: a["browser_download_url"] for a in r.get("assets", [])})
@@ -668,7 +672,13 @@ def remove_one(rel, bdir, old, journal, jpath):
     dest = under_root(rel)
     if not os.path.lexists(dest) or os.path.isdir(dest) and not os.path.islink(dest):
         return
-    if old is None or os.path.islink(dest) or sha256_file(dest) != old.get("sha256"):
+    if old is None:
+        return
+    if old.get("type", "file") == "link":
+        # a link we put there (0.2.2's multi-user.target.wants/zsleepd.service)
+        if not os.path.islink(dest) or os.readlink(dest) != old.get("target"):
+            return
+    elif os.path.islink(dest) or sha256_file(dest) != old.get("sha256"):
         return  # not what we put there: leave it
     backup(rel, bdir)
     note(journal, jpath, "removed", rel)

@@ -38,6 +38,7 @@ mkroot() { # DIR VER
 mkroot r1 0.1; mkroot r2 0.2
 echo new-in-02 > r2/usr/local/bin/znew
 echo gone-in-02 > r1/usr/local/bin/zold
+ln -s znew r1/usr/local/bin/zold-link    # a link gone in 0.2 (0.2.2's wants link)
 mkdir -p ov/etc/zt; : > ov/etc/zt/a.conf; : > ov/etc/zt/b.conf
 echo "Sinov versiyasi" > notes
 
@@ -88,6 +89,7 @@ python3 "$UPD" apply || fail "apply: $(cat run/status.json)"
 [ "$(cat phone/etc/zt/b.conf)" = "conf b 0.2" ] || fail "b.conf (unchanged, ours) not updated"
 [ "$(readlink phone/usr/local/bin/ztos-sdk)" = ../lib/ztos-sdk/bin/ztos-sdk ] || fail "link"
 [ ! -e phone/usr/local/bin/zold ] || fail "a file gone in 0.2 is still there"
+[ ! -L phone/usr/local/bin/zold-link ] || fail "a link gone in 0.2 is still there"
 grep -q "apply: package update-0.1-to-0.2.tar.zst" log || fail "the delta was not used"
 ok "apply (delta): files, modes, new file, link, removed file; owner's conf kept (.new), ours replaced"
 
@@ -95,6 +97,7 @@ python3 "$UPD" rollback || fail "rollback: $(cat run/status.json)"
 [ "$(phone/usr/local/bin/ztmetro)" = "ztmetro 0.1" ] || fail "rollback ztmetro"
 [ ! -e phone/usr/local/bin/znew ] || fail "rollback left a created file"
 [ "$(cat phone/usr/local/bin/zold)" = gone-in-02 ] || fail "rollback did not bring back a removed file"
+[ "$(readlink phone/usr/local/bin/zold-link)" = znew ] || fail "rollback did not bring back a removed link"
 [ ! -e phone/etc/zt/a.conf.new ] || fail "rollback left a.conf.new"
 [ "$(cat phone/etc/zt/b.conf)" = "conf b 0.1" ] || fail "rollback b.conf"
 [ "$(cat phone/etc/zt/a.conf)" = mine ] || fail "rollback touched the owner's conf"
