@@ -1,0 +1,5 @@
+# The S10 5G's sensor hub transport: Broadcom's bbd/SSI code from
+# sensors/driver/ (copied in by build.sh) with this phone's board file.
+obj-m += zrn-bbd-bx.o
+zrn-bbd-bx-y := bbd.o bbd_rpc_lh.o bcm_gps_spi.o bcm_gps_regs.o bcm_gps_mem.o zrn_bbd_board_bx.o
+ccflags-y += -DZRN_BOARD_BEYONDX -I$(src) -include $(src)/zrn_compat.h -Wno-unused-function -Wno-unused-variable -Wno-missing-prototypes -Wno-declaration-after-statement

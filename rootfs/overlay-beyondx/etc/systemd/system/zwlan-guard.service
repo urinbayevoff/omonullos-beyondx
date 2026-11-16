@@ -1,0 +1,15 @@
+# Galaxy S10 5G: bring the Wi-Fi back when the BCM4375 drops out while the
+# phone is awake (kernel/beyondx/zwlan-guard.sh). Added for OmonullOS,
+# November 2026.
+[Unit]
+Description=zboot (Galaxy S10 5G): Wi-Fi recovery without a reboot
+After=zwlan.service
+ConditionPathExists=!/etc/zwlan-guard.off
+
+[Service]
+ExecStart=/usr/local/bin/zwlan-guard watch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

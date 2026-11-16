@@ -1,0 +1,10 @@
+• Qönğiroqda quloq: telefonni quloqqa tutsangiz ekran öçadi, olsangiz yonadi (ekran sensori orqali). Birinçi bosqiç: ba'zan kech yoki umuman yonmay qolişi mumkin, ustida işlaymiz.
+• Qönğiroq: javob berganingizdan keyin ovoz deyarli darhol ulanadi (~2.3 s örniga ~0.8 s).
+• Wi-Fi: kamdan-kam Wi-Fi butunlay öçib qoladigan xatoga qarşi: endi telefon buni özi sezadi va Wi-Fi'ni bir necha soniyada qayta yoqadi (reboot kerak emas). Uyqudan keyin Wi-Fi ulanmasa ham özi qayta qidiradi.
+• Uyqu: telefon uxlab turganda zaryadlovçi ulansa, u uyğonadi va zaryadlana boşlaydi. Uyqudan keyin ekran sensori ham joyiga qaytadi.
+• Toʻliq ekran: ilova soʻrasa (Tube'dagi tugma, Chromium'dagi video), u yonboşlab butun ekranni oladi — status satri va çiziq yöq. Telefonni çap tomoni pastga qaratib uşlang. Çiqiş: ilovaning tugmasi yoki çap çetdan «orqaga».
+• Çiziq rejimi: ilova ostidagi tasma endi bir xil rangda (Chromium'da pastdagi matn «ştrix-kod» bölib çözilmaydi).
+• Sozlamalar: protsessor, xotira, grafika, ekran va batareya sahifalari endi S10 5G'ning özini körsatadi (Exynos 9820, Mali-G76 MP12, 8 GB, 4500 mAh), S9'niki emas.
+• ztMETRO: ekran ölçami yoki uslub özgartirilganda endi qulamasdan, toza qayta işga tuşadi.
+• Ovoz drayveri: ikkala karnay himoya bilan stereo çalişi uçun tayyor (hozircha sozlamasi qölda yoqiladi); qönğiroqda quloq karnayi odatiy balandlikda qoladi.
+• Telefonni qayta yoqing.

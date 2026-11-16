@@ -208,6 +208,8 @@ if [ "$DEVICE" = beyondx ]; then
 		printf '#include "exynos9820-beyondx-pcie.dtsi"\n' >> "$SRC/$DTS"
 		# mainline brcmfmac has the 4375's siblings, not the 4375
 		python3 "$ROOT/kernel/patch-brcmfmac-4375.py" "$SRC"
+		# relaxed ordering off + sane ring indices (RX oops, 11-16)
+		python3 "$ROOT/kernel/patch-brcmfmac-ordering.py" "$SRC"
 	fi
 	if [ -n "$MEM" ]; then
 		printf '\n#include "exynos9820-beyondx-mem.dtsi"\n' >> "$SRC/$DTS"

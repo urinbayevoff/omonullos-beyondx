@@ -48,6 +48,7 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -554,6 +555,9 @@ static const struct dw_pcie_ops exynos9820_pcie_ops = {
 	.stop_link = exynos9820_pcie_stop_link,
 };
 
+/* the one root complex, for relink (below) */
+static struct exynos9820_pcie *relink_ep;
+
 static int exynos9820_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -629,6 +633,8 @@ static int exynos9820_pcie_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, ep);
 
 	ret = dw_pcie_host_init(&pci->pp);
+	if (!ret)
+		WRITE_ONCE(relink_ep, ep);
 	if (ret) {
 		/* ep is devm memory: the chained handler must not outlive it */
 		dev_err(dev, "failed to initialize host: %d\n", ret);
@@ -706,6 +712,85 @@ static const struct of_device_id exynos9820_pcie_of_match[] = {
 	{ },
 };
 MODULE_DEVICE_TABLE(of, exynos9820_pcie_of_match);
+
+/*
+ * Awake recovery. 16.11 09:53 (and 06:13, 15.11 21:46): every ring index
+ * the brcmfmac read was 0xffff and the firmware never answered again, the
+ * module had dropped out; only a reboot brought Wi-Fi back. Stock Android
+ * recovers the same way: its HANG event makes the HAL power the module
+ * down and up. Here user space (zwlan-recover) removes 0000:01:00.0, writes
+ * relink, and rescans the bus. Reading relink tells the link state.
+ * Modified for OmonullOS, November 2026: relink.
+ */
+
+static int relink_get(char *buf, const struct kernel_param *kp)
+{
+	struct exynos9820_pcie *ep = READ_ONCE(relink_ep);
+
+	if (!ep)
+		return sysfs_emit(buf, "none\n");
+	return sysfs_emit(buf, "%s ltssm %08x history %08x\n",
+			  exynos9820_pcie_link_up(&ep->pci) ? "up" : "down",
+			  elb_readl(ep, PCIE_ELBI_RDLH_LINKUP),
+			  elb_readl(ep, PCIE_STATE_HISTORY_CHECK));
+}
+
+static int relink_set(const char *val, const struct kernel_param *kp)
+{
+	struct exynos9820_pcie *ep = READ_ONCE(relink_ep);
+	struct dw_pcie_rp *pp;
+	struct device *dev;
+	struct pci_dev *rp;
+	int ret;
+
+	if (!ep || !ep->pci.pp.bridge)
+		return -ENODEV;
+	pp = &ep->pci.pp;
+	dev = ep->pci.dev;
+	pci_lock_rescan_remove();
+	rp = pci_get_slot(pp->bridge->bus, PCI_DEVFN(0, 0));
+	if (!rp) {
+		ret = -ENODEV;
+		goto out;
+	}
+	/* the endpoint must be gone first: its driver would touch it meanwhile */
+	if (rp->subordinate && !list_empty(&rp->subordinate->devices)) {
+		ret = -EBUSY;
+		goto put;
+	}
+	dev_info(dev, "relink: link %s (%08x, history %08x): module off and on\n",
+		 exynos9820_pcie_link_up(&ep->pci) ? "up" : "down",
+		 elb_readl(ep, PCIE_ELBI_RDLH_LINKUP),
+		 elb_readl(ep, PCIE_STATE_HISTORY_CHECK));
+	/* the root port's config lives in the DBI, which the core reset clears */
+	pci_save_state(rp);
+	exynos9820_pcie_stop_link(&ep->pci);
+	pin_out(ep->gpg0, GPG0_WL_REG_ON, 0);
+	msleep(500);		/* as probe: long enough to really power down */
+	bank_field(ep->gpg0, GPIO_DAT, GPG0_WL_REG_ON, 1, 1);
+	msleep(200);
+	exynos9820_pcie_host_init(pp);
+	ret = dw_pcie_setup_rc(pp);
+	if (!ret)
+		ret = exynos9820_pcie_start_link(&ep->pci);
+	pci_restore_state(rp);
+	if (ret)
+		dev_err(dev, "relink: link not back (%d)\n", ret);
+	else
+		dev_info(dev, "relink: link up again\n");
+put:
+	pci_dev_put(rp);
+out:
+	pci_unlock_rescan_remove();
+	return ret;
+}
+
+static const struct kernel_param_ops relink_ops = {
+	.set = relink_set,
+	.get = relink_get,
+};
+module_param_cb(relink, &relink_ops, NULL, 0600);
+MODULE_PARM_DESC(relink, "write: power the Wi-Fi module off and on, train the link again (0000:01:00.0 removed first); read: link state");
 
 /* no .remove: never rmmod (CLAUDE.md rule 7), reboot to try a new build */
 static struct platform_driver exynos9820_pcie_driver = {

@@ -217,3 +217,22 @@ CAL_CHECKSUM, CAL_SET_STATUS**, BDLOG_MAX_TEMP / MAX_EXC / OVER_TEMP_COUNT / OVE
   41.8 C (684275), temp qo'shiq pasayganda ~27 C ga qaytadi, power ≤763 (-6 dB'da ≤271), overtemp/overexc/mute/
   reduce 0, gain 1.0. Egasi: «ovoz yaxshi». **16:53** egasi «ha» → conf `dsp_vol_boost=168` (zaxira
   `.bak-1114-1653` = 144). Ehtiyot: dsp_diag ipeak/vpeak hali 0 (temp model esa qimirlaydi); 0 dB (192) qilinmaydi.
+
+### 2026-11-15 — stereo (ikkala amp himoya bilan), quloq dinamigi kalibrovkasi
+
+- Eski modul bilan jonli sinov (egasi «ha»): `amp_dsp=3 amp_mask=3`, boost 96 (-12 dB) va 144 (-6 dB): ikkala
+  karnaydan toza ovoz, state 0, eng ko'pi 31.9 C (bot) / 29.1 C (rcv), overtemp/mute 0.
+- **Topilma:** `dsp_vol_boost` himoya orqali chalayotgan har qanday amp'ga qo'shilardi — quloq dinamigi qo'ng'iroqda
+  ham (+18 dB quloqda); stereo → qo'ng'iroqda amp yoniq qolib, eski yo'l saqlanardi. Darhol mono -3 dB'ga qaytarildi.
+- 40d0829 (`spk-stereo`): qo'ng'iroqda quloq dinamigi hech qachon DSP orqali emas (ASPRX1, boost yo'q); call on/off va
+  amp_mask o'zgarganda amp'lar avval o'chadi; `dsp_cal_r_rcv` (8580), `dsp_calibrate_rcv`. Telefonda yig'ildi
+  (taskset 0-3, -j1: -j8 yig'ish 85 C → issiqlik himoyasi CPU offline → osilish, TWRP).
+- O'rnatildi (`/root/tools/snd-zrn-abox-bx.ko` sha e6170f7c, eskisi `.bak-1115`) + reboot. Qo'ng'iroq (karnay tugmasi
+  bilan): quloq dinamigi DSP'si to'xtab turdi (hb qotdi), ovoz oddiy; keyin stereo tiklandi.
+- `cs35l40-rcv-dsp1-spk-prot-calib.bin` VENDOR'dan `/usr/lib/firmware` ga (sha d48a9107). `dsp_calibrate_rcv=23`:
+  **status 1, R 7874 = 5.6297 Ω**, 940 ms, checksum ok. (8786 bilan model quloq dinamigini sovuqroq ko'rgan bo'lardi.)
+- Stereo -3 dB (168), qo'shiq ~3 daq: state 0, eng ko'pi 35.5 C (bot) / 37.1 C (rcv), power ≤1135 / ≤357,
+  overtemp/overexc/mute/reduce 0; egasi: «ikkalasidan, toza, balandroq».
+- Doimiy (egasi «ha»): `/etc/modprobe.d/snd-zrn-abox-bx.conf` = `dsp_cal_r=8786 dsp_cal_r_rcv=7874 amp_dsp=3
+  amp_mask=3 dsp_run_reinit=1 dsp_vol_boost=168` (eskisi `.bak-1115-stereo`). 0 dB qilinmaydi.
+- Ochiq: ipeak/vpeak hali 0 (temp modeli ishlaydi); zspk-calibrate faqat pastki karnayni o'lchaydi; drayver OTA'da yo'q.

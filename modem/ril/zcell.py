@@ -25,6 +25,10 @@
 # off, and the RIL's answers with the DSP's log go to the field logs.
 #   python3 zcell.py   (zmodem start runs it while the RIL runs)
 # Added for OmonullOS, October 2026.
+# November 2026: the ear in a call (ear_tick): the touch IC's ear detection
+# (zrn-s6sy761's ear_detect, input "s6sy761 ear detect", SW_FRONT_PROXIMITY)
+# darkens the screen through ztMETRO's "prox near|far", as stock does; the
+# IC goes to its low power mode while dark (lp_mode), or it stops sensing.
 import glob, os, re, signal, socket, struct, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zsend import tpdu
@@ -130,6 +134,30 @@ def ring(on):
 	global ringer
 	stop(ringer)
 	ringer = player(ringtone(), ring_volume()) if on else None
+	if on:
+		keep_graph()	# so that it is long steady by the answer (call_audio)
+
+def silence():
+	if not os.path.exists(SILENCE):
+		import wave
+		with wave.open(SILENCE, 'wb') as w:
+			w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
+			w.writeframes(bytes(4 * 48000 * 60))	# long: each restart pauses the DSP's PCM
+		os.chmod(SILENCE, 0o644)
+	return SILENCE
+
+def keep_graph():
+	"""silence played on, so the ABOX graph (WDMA3/RDMA7) runs without a
+	pause: from the ring of an incoming call (the ringtone's own pw-play
+	stops between plays and at the answer), else from the call's audio"""
+	global keeper, keeper_since
+	if keeper is None or keeper.poll() is not None:
+		keeper, keeper_since = player([silence()], 1.0, gap=0), time.time()
+
+def drop_graph():
+	global keeper
+	stop(keeper)
+	keeper = None
 
 SILENCE = '/run/zcell-silence-60s.wav'
 OEM_SOUND = {	# libsecril-client: 08 <cmd> 00 <length> <args>
@@ -138,6 +166,7 @@ OEM_SOUND = {	# libsecril-client: 08 <cmd> 00 <length> <args>
 	'volume': '080300060104',	# SetCallVolume(handset 1, 4)
 }
 keeper, audio_log, audio_on, audio_since, snaps, seen = None, [], False, 0, [], set()
+keeper_since = 0	# when the silence started (keep_graph)
 LOG_EVERY, log_due = 0.2, 0	# log_due: the next read of the DSP's log while a call lasts
 ABOX_IPC = '/sys/module/snd_zrn_abox_bx/parameters/ipc'	# "IPC_SYSTEM 0 msgtype param1"
 VSS_STARTED = '/run/zcell-vss-started'
@@ -333,15 +362,20 @@ def abox_call(on):
 	except OSError as e:
 		audio_log.append('%.3f abox call streams %d failed: %s' % (time.time(), on, e))
 
-def graph_steady(limit=4.0, steady=1.0):
-	"""wait for the realtime WDMA3 (CTRL0 bit 0) to run STEADY s"""
+def graph_steady(limit=4.0, steady=1.0, running_since=None):
+	"""wait for the realtime WDMA3 (CTRL0 bit 0) to run STEADY s; a stream
+	that has been playing since RUNNING_SINCE counts from then (a ring's)"""
 	t0, since = time.time(), None
+	first = True
 	while time.time() - t0 < limit:
 		try:
 			on = int(subprocess.run(['zpoke', '18c53300'], capture_output=True,
 				text=True, timeout=2).stdout.split()[-1], 16) & 1
 		except (OSError, subprocess.SubprocessError, ValueError, IndexError):
 			on = 0
+		if on and first and running_since:
+			since = running_since	# it ran before we looked
+		first = False
 		since = (since or time.time()) if on else None
 		if since and time.time() - since >= steady:
 			break
@@ -355,21 +389,19 @@ def call_audio(on):
 	global keeper, audio_on, audio_since, snaps, diag_due, call_vol
 	if on:
 		audio_on, audio_since = True, time.time()
-		if not os.path.exists(SILENCE):
-			import wave
-			with wave.open(SILENCE, 'wb') as w:
-				w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
-				w.writeframes(bytes(4 * 48000 * 60))	# long: each restart pauses the DSP's PCM
-			os.chmod(SILENCE, 0o644)
 		for what in ('path', 'clock on', 'volume'):
 			audio_log.append('%.3f > %s %s' % (time.time(), what, OEM_SOUND[what]))
 			s.sendall(('rawx 59 %s\n' % OEM_SOUND[what]).encode())
 		# IN_CALL and VOICE once the silence's streams run steady: sent while
 		# WDMA3/RDMA7 were paused (the ringtone just gone) or 0.3 s after they
 		# started, the first call of a boot faulted the DSP (a jump to its
-		# reset code, 0xbcb8, at SET CALLPATH); with the ringtone playing on, not
-		keeper = player([SILENCE], 1.0, gap=0)
-		graph_steady()
+		# reset code, 0xbcb8, at SET CALLPATH); with the ringtone playing on, not.
+		# An incoming call's silence started with its ring (keep_graph): by the
+		# answer it has run for seconds and the wait is one look (15.11; the
+		# answer to the voice was ~2.3 s, 1.1 of it this wait)
+		ringing = keeper is not None and keeper.poll() is None
+		keep_graph()
+		graph_steady(running_since=keeper_since if ringing else None)
 		abox('1 0 0x50 2', 'mode IN_CALL')
 		abox('1 0 0x60 0', 'type VOICE')
 		snaps = [(time.time() + 0.5, True)]
@@ -394,8 +426,7 @@ def call_audio(on):
 	call_speaker(False)
 	call_vol = 4	# OEM_SOUND's, where the next call starts
 	s.sendall(b'rawi 53 0\n')	# unmuted for the next call, whoever muted this one
-	stop(keeper)
-	keeper = None
+	drop_graph()
 
 def log_line(path, line):
 	os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -427,12 +458,15 @@ def call_set(state, number=''):
 		tell_shell('notify Phone|Kiruvçi qönğiroq|%s\n' % (number or 'Javob beriş uçun Telefonni oçing'))
 	if (state == 'incoming') != (call['state'] == 'incoming'):
 		ring(state == 'incoming')
+		if not state and not audio_on:
+			drop_graph()	# missed or turned down: its ring's silence goes too
 	try:	# the call's audio never takes the call (its status) down with it
 		# an incoming call tells the DSP at the answer, as Android's IN_CALL is:
 		# IN_CALL 0.3 s after the ringtone's stream started faulted the DSP (09:03)
 		if state and state != 'incoming' and not call.get('mode'):
-			if call['state'] == 'incoming':
+			if call['state'] == 'incoming' and (keeper is None or keeper.poll() is not None):
 				time.sleep(0.3)	# the ringtone's pw-play gone, the sink steady
+				# (not needed while the ring's silence plays on: the sink never paused)
 			call_mode(True)
 			call['mode'] = True
 		if state == 'active' and call['state'] != 'active':	# the voice's delay starts here
@@ -500,6 +534,97 @@ def command(cmd):
 
 CALL_STATE = {0: 'active', 1: 'active', 2: 'dialing', 3: 'ringing', 4: 'incoming', 5: 'incoming'}
 
+# The ear in a call: on while it dials, rings out or talks on the handset
+# (not on the speaker, not while it rings in). Only with zrn-s6sy761 bound
+# (the built-in s6sy761 has no ear_detect): nothing happens without it.
+EAR_DEV = '/sys/bus/i2c/devices/1-0048'
+ear = {'fd': None, 'near': False, 'lp_at': 0.0, 'far_at': 0.0}
+# A far is believed only after it held EAR_FAR_HOLD s: held normally at the
+# ear the IC flickers to far for 0.15-0.57 s (owner 11-16, A/B test). Its
+# first report in low power is a false far, 0.7 to 7 s long, with the ear
+# there: no far counts before EAR_LP_SETTLE s in low power (a real one then
+# lights it late, the power key still does at once).
+EAR_FAR_HOLD, EAR_LP_SETTLE = 0.8, 4.0
+
+def ear_input():
+	for name in glob.glob('/sys/class/input/event*/device/name'):
+		try:
+			with open(name) as f:
+				if f.read().strip() == 's6sy761 ear detect':
+					return '/dev/input/' + name.split('/')[4]
+		except OSError:
+			pass
+	return None
+
+def ear_mode(v):
+	try:
+		with open(EAR_DEV + '/ear_detect', 'w') as f:
+			f.write('%d\n' % v)
+		return True
+	except OSError:
+		return False
+
+def ear_lp(v):	# the IC's low power mode while dark: it senses the ear on
+	try:		# with the panel off (stock enters it at display off)
+		with open(EAR_DEV + '/lp_mode', 'w') as f:
+			f.write('%d\n' % v)
+	except OSError:
+		pass
+
+def ear_say(near):
+	ear['far_at'] = 0.0
+	if near != ear['near']:
+		ear['near'] = near
+		audio_log.append('%.3f ear %s' % (time.time(), 'near' if near else 'far'))
+		if near:
+			tell_shell('prox near\n')
+			time.sleep(0.15)	# the panel off first, as stock
+			ear_lp(1)
+			ear['lp_at'] = time.time()
+		else:
+			ear_lp(0)
+			tell_shell('prox far\n')
+
+def ear_event(near):	# a report from the IC: a far waits (see EAR_FAR_HOLD)
+	t = time.time()
+	if near or not ear['near']:
+		ear_say(near)
+		return
+	if not ear['far_at']:
+		ear['far_at'] = max(t + EAR_FAR_HOLD, ear['lp_at'] + EAR_LP_SETTLE)
+
+def ear_tick():
+	want = call['state'] in ('dialing', 'ringing', 'active') and not call_spk
+	if want and ear['fd'] is None:
+		dev = os.path.exists(EAR_DEV + '/ear_detect') and ear_input()
+		if dev and ear_mode(1):
+			try:
+				ear['fd'] = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+			except OSError:
+				ear_mode(0)
+	elif not want and ear['fd'] is not None:
+		os.close(ear['fd'])
+		ear['fd'] = None
+		ear_say(False)	# the screen back at the end, or for the speaker
+		ear_mode(0)
+	if ear['fd'] is None:
+		return
+	if ear['far_at'] and time.time() >= ear['far_at']:
+		ear_say(False)
+	try:
+		data = os.read(ear['fd'], 24 * 16)
+	except BlockingIOError:
+		return
+	except OSError:	# the device went (unbound): as if far
+		os.close(ear['fd'])
+		ear['fd'] = None
+		ear_say(False)
+		return
+	for i in range(0, len(data) - 23, 24):	# struct input_event, 64-bit
+		typ, code, value = struct.unpack_from('<HHi', data, i + 16)
+		if typ == 5 and code == 0x0b:	# EV_SW, SW_FRONT_PROXIMITY (1 near, 1 touch too)
+			ear_event(value != 0)
+
 def publish():
 	reg = REG.get(now['voice'], 'none')
 	if reg not in ('home', 'roaming') and now['data'] in (1, 5):
@@ -536,6 +661,9 @@ def wish(on):
 
 def gone(*_):
 	ring(False)
+	if ear['fd'] is not None:
+		ear_say(False)
+		ear_mode(0)
 	stop(keeper)
 	for f in (STATUS, CTL):
 		try:
@@ -563,6 +691,7 @@ try:
 		while b'\n' in cbuf:
 			cmd, cbuf = cbuf.split(b'\n', 1)
 			command(cmd.decode(errors='replace').strip())
+		ear_tick()
 		if not call['state'] and not os.path.exists(VSS_STARTED) and uptime() > VSS_AT:
 			start_vss()
 		if time.time() >= due:

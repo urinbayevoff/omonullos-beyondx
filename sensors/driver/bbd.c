@@ -1,6 +1,8 @@
 /*
  * Copyright 2014 Broadcom Corporation
  *
+ * Modified for OmonullOS, Nov 2026: the S10 5G's (beyondx) hub patch.
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2, as
  * published by the Free Software Foundation (the "GPL").
@@ -134,6 +136,12 @@ static unsigned char bbd_patch[] = {
  * transport layer (MCU_BCM477X_transport_layer.c line 165) every so often.
  * From xxmustafacooTR/exynos-linux-stable, bbdpl/q_os. */
 #include "q_os/bbd_patch_file_star.h"
+#elif defined(CONFIG_SENSORS_SSP_BEYOND)
+/* Galaxy S10 5G (beyondx, ap_type 3, hw_rev >= 4: Samsung's "current"
+ * patch): the Android 11 one, as the phone's vendor lhd. Not in git: made
+ * by sensors/beyondx/mk-patch-h.py from the TWRP kernel on RECOVERY, the
+ * same text as r_os/bbd_patch_file_beyond.h of Samsung's beyond kernel. */
+#include "r_os/bbd_patch_file_beyond.h"
 #elif defined(CONFIG_SENSORS_SSP_CROWN)
 #if ANDROID_VERSION < 90000
 #include "o_os/bbd_patch_file_crown.h"

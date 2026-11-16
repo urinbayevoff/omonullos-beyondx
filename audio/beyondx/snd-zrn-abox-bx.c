@@ -876,7 +876,11 @@ static int call_set(const char *arg, const struct kernel_param *kp)
 		rt_for_call(false);
 	}
 	pr_info("snd-zrn-abox-bx: call streams %s (%d)\n", on ? "on" : "off", ret);
-	amps_apply();		/* call_amp_mask while the call runs */
+	/* call_amp_mask while the call runs. All off first: the earpiece, on
+	 * for stereo media through its protection (dsp_vol_boost), must not stay
+	 * on that way into a handset call (spk_route) */
+	amps_power(false);
+	amps_apply();
 	return ret;
 }
 static const struct kernel_param_ops call_ops = { .set = call_set, .get = param_get_int };
@@ -1469,10 +1473,15 @@ static struct amp amps[] = {
 static int amp_mask = 1;
 static int amp_mask_set(const char *arg, const struct kernel_param *kp)
 {
+	int old = *(int *)kp->arg;
 	int ret = param_set_int(arg, kp);
 
-	if (!ret)
+	if (!ret && *(int *)kp->arg != old) {
+		/* all off first: an amp that stays on gets its slots (amp_tx) and
+		 * its route (spk_route) again, as for a new stream */
+		amps_power(false);
 		amps_apply();
+	}
 	return ret;
 }
 static const struct kernel_param_ops amp_mask_ops = { .set = amp_mask_set, .get = param_get_int };
@@ -1669,6 +1678,8 @@ MODULE_PARM_DESC(dsp_fs_errata, "DSP rate selectors at run: 0 stock (all 0), 1 m
 #define SPK_RDC_MIN		5600
 #define SPK_RDC_MAX		14000
 static int dsp_cal_r = 8580, dsp_cal_ambient = 23;	/* stock's defaults */
+/* the earpiece's: stock's /efs/cirrus/rdc_cal_r (absent here) else 8580 */
+static int dsp_cal_r_rcv = 8580;
 static int dsp_cal_r_set(const char *arg, const struct kernel_param *kp)
 {
 	int v, ret = kstrtoint(arg, 0, &v);
@@ -1677,12 +1688,18 @@ static int dsp_cal_r_set(const char *arg, const struct kernel_param *kp)
 		return ret;
 	if (v < SPK_RDC_MIN || v > SPK_RDC_MAX)
 		return -EINVAL;
-	WRITE_ONCE(dsp_cal_r, v);
+	WRITE_ONCE(*(int *)kp->arg, v);
 	return 0;
 }
 static const struct kernel_param_ops dsp_cal_r_ops = { .set = dsp_cal_r_set, .get = param_get_int };
 module_param_cb(dsp_cal_r, &dsp_cal_r_ops, &dsp_cal_r, 0644);
 MODULE_PARM_DESC(dsp_cal_r, "bottom speaker RDC for the protection (stock default 8580; 5600..14000)");
+module_param_cb(dsp_cal_r_rcv, &dsp_cal_r_ops, &dsp_cal_r_rcv, 0644);
+MODULE_PARM_DESC(dsp_cal_r_rcv, "earpiece RDC for the protection (stock default 8580; 5600..14000)");
+static int *spk_cal_r(struct amp *a)
+{
+	return a == &amps[0] ? &dsp_cal_r : &dsp_cal_r_rcv;
+}
 module_param(dsp_cal_ambient, int, 0444);
 /*
  * IMON/VMON reached the protection only after a REINIT (ipeak/vpeak 0 and the
@@ -1824,15 +1841,16 @@ static int spk_load(struct amp *a)
  */
 static int spk_cal(struct amp *a)
 {
+	int r = READ_ONCE(*spk_cal_r(a));
 	int ret;
 
-	ret = spk_ctl_write(a, "CAL_R", CSPL_ALG, dsp_cal_r);
+	ret = spk_ctl_write(a, "CAL_R", CSPL_ALG, r);
 	if (!ret)
 		ret = spk_ctl_write(a, "CAL_AMBIENT", CSPL_ALG, dsp_cal_ambient);
 	if (!ret)
 		ret = spk_ctl_write(a, "CAL_STATUS", CSPL_ALG, 1);
 	if (!ret)
-		ret = spk_ctl_write(a, "CAL_CHECKSUM", CSPL_ALG, 1 + dsp_cal_r);
+		ret = spk_ctl_write(a, "CAL_CHECKSUM", CSPL_ALG, 1 + r);
 	return ret;
 }
 
@@ -1879,7 +1897,7 @@ static int spk_run(struct amp *a)
 	if (ret)
 		goto fail;
 	dev_info(dev, "%s: speaker protection running, cal R %d ambient %d\n",
-		 a->name, dsp_cal_r, dsp_cal_ambient);
+		 a->name, *spk_cal_r(a), dsp_cal_ambient);
 	return 0;
 fail:
 	cs_dsp_stop(&a->dsp);
@@ -1917,6 +1935,10 @@ static bool spk_route(struct amp *a, int i)
 {
 	bool dsp = false;
 
+	/* a call on the earpiece (handset, at the ear) stays as tested: the amp
+	 * plays ASPRX1 itself, no dsp_vol_boost (that is for stereo media) */
+	if (i == 1 && READ_ONCE(call_on))
+		goto route;
 	if ((READ_ONCE(amp_dsp) & BIT(i)) && mutex_trylock(&dsp_lock)) {
 		if (a->fw_loaded && !a->dsp_failed) {
 			if (a->dsp.running) {
@@ -1931,6 +1953,7 @@ static bool spk_route(struct amp *a, int i)
 		}
 		mutex_unlock(&dsp_lock);
 	}
+route:
 	if (dsp) {
 		spk_inputs(a);
 		regmap_write(a->regmap, CS35L41_DAC_PCM1_SRC, CS35L41_INPUT_DSP_TX1);
@@ -2242,7 +2265,7 @@ static int spk_calibrate(struct amp *a, int ambient)
 	spk_ctl_read(a, "CSPL_STATE", CSPL_ALG, &cs);
 	/* a good measurement is the RDC from now on (until reboot) */
 	if (st == 1 && ck == st + r && r >= SPK_RDC_MIN && r <= SPK_RDC_MAX && cs != 1) {
-		WRITE_ONCE(dsp_cal_r, r);
+		WRITE_ONCE(*spk_cal_r(a), r);
 		kept = true;
 	}
 restore:
@@ -2283,7 +2306,7 @@ restore:
 
 static int dsp_calibrate_set(const char *arg, const struct kernel_param *kp)
 {
-	struct amp *a = &amps[0];	/* the bottom speaker */
+	struct amp *a = kp->arg;	/* dsp_calibrate the bottom speaker, _rcv the earpiece */
 	int ambient, ret = kstrtoint(arg, 0, &ambient);
 
 	if (ret)
@@ -2301,8 +2324,10 @@ static int dsp_calibrate_set(const char *arg, const struct kernel_param *kp)
 	return ret;
 }
 static const struct kernel_param_ops dsp_calibrate_ops = { .set = dsp_calibrate_set };
-module_param_cb(dsp_calibrate, &dsp_calibrate_ops, NULL, 0200);
+module_param_cb(dsp_calibrate, &dsp_calibrate_ops, &amps[0], 0200);
 MODULE_PARM_DESC(dsp_calibrate, "measure the bottom speaker's RDC (write the ambient C) while it plays through the protection");
+module_param_cb(dsp_calibrate_rcv, &dsp_calibrate_ops, &amps[1], 0200);
+MODULE_PARM_DESC(dsp_calibrate_rcv, "the same for the earpiece (amp_mask 3, amp_dsp 3, no call)");
 
 /*
  * ASPTX1/2 on with the amp, off (DOUT hi-Z) without it. One amp alone sends
@@ -2386,7 +2411,7 @@ static void spk_first_reinit(struct amp *a)
 		dev_err(dev, "%s: protection REINIT failed (%d), protection off\n", a->name, ret);
 	} else {
 		dev_info(dev, "%s: protection REINIT with the amp on, cal R %d, CSPL_STATE %u\n",
-			 a->name, dsp_cal_r, cs1);
+			 a->name, *spk_cal_r(a), cs1);
 	}
 out:
 	mutex_unlock(&dsp_lock);

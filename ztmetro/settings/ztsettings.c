@@ -1350,6 +1350,64 @@ static void cell_load(void) {
 }
 
 static bool about_beyondx(void);
+
+/* OmonullOS: what the phone is made of, by phone. The S9's lines are
+ * upstream's; on the S10 5G our kernel has no cpufreq or devfreq yet, so its
+ * clusters and GPU show how fast they can go instead of a made-up reading.
+ * (After the device_fact() idea in Davitekk/ztOS starqltechn-port.) */
+struct dev_cluster {
+	const char *label;	/* a key of ztlang */
+	const char *freq;	/* cpufreq's scaling_cur_freq, kHz */
+	double fallback;	/* MHz, when there is none (the S9's way) */
+	const char *range;	/* the S9's "(min - max MHz)" */
+	int max_mhz;		/* without cpufreq: "up to" this */
+};
+struct dev_facts {
+	const char *soc_entry;	/* "Exynos 98x0 (8 cores), %s" (governor) */
+	const char *soc;
+	struct dev_cluster cl[3];
+	const char *ram;	/* the system page's line */
+	const char *ram_kind;
+	const char *storage;
+	const char *gpu_entry;	/* "... (%s), 60 FPS" (governor) */
+	const char *gpu;
+	const char *gpu_freqs;	/* the S9's list, or NULL: "up to gpu_max" */
+	int gpu_max;
+	const char *display;
+	const char *battery;
+};
+
+static const struct dev_facts DEV_S9 = {
+	"Exynos 9810 (8 cores), %s", "Samsung Exynos 9810 (10nm LPP)",
+	{ { "LITTLE Cluster (Cores 0-3, Cortex-A55)", "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq",
+	    1794.0, "350 - 1794 MHz", 0 },
+	  { "BIG Cluster (Cores 4-7, M3 Cheetah)", "/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq",
+	    2704.0, "400 - 2704 MHz", 0 } },
+	"3.5 GB RAM", "Physical Memory (LPDDR4X)", "UFS 2.1 Storage",
+	"Mali-G72 MP18 (%s), 60 FPS", "ARM Mali-G72 MP18 (Bifrost)", "260, 455, 572 MHz", 572,
+	"Super AMOLED 1440x2960 @ 60.00 Hz", "3000 mAh Li-Ion, Health Good",
+};
+
+static const struct dev_facts DEV_S10_5G = {
+	"Exynos 9820 (8 cores), %s", "Samsung Exynos 9820 (8nm LPP)",
+	{ { "LITTLE Cluster (Cores 0-3, Cortex-A55)", "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq",
+	    0, NULL, 1950 },
+	  { "MIDDLE Cluster (Cores 4-5, Cortex-A75)", "/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq",
+	    0, NULL, 2310 },
+	  { "BIG Cluster (Cores 6-7, Exynos M4)", "/sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq",
+	    0, NULL, 2730 } },
+	"8 GB RAM", "Physical Memory (LPDDR4X)", "UFS 3.0 Storage",
+	"Mali-G76 MP12 (%s), 60 FPS", "ARM Mali-G76 MP12 (Bifrost)", NULL, 702,
+	"Dynamic AMOLED 1440x3040 @ 60.00 Hz", "4500 mAh Li-Ion, Health Good",
+};
+
+static const struct dev_facts *dev(void) {
+	static const struct dev_facts *facts;
+	if (!facts) {
+		facts = about_beyondx() ? &DEV_S10_5G : &DEV_S9;
+	}
+	return facts;
+}
 static int brightness_now(void);
 
 static double draw_main(cairo_t *cr) {
@@ -1405,13 +1463,13 @@ static double draw_main(cairo_t *cr) {
 	snprintf(detail, sizeof(detail), "%d%%, %s", bat, ZT_(app.battery_saver ? "battery saver on" : "discharging"));
 	y = zmc_entry(cr, y, "battery saver", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
 
-	snprintf(detail, sizeof(detail), ZT_("Exynos 9810 (8 cores), %s"), app.cpu_gov);
+	snprintf(detail, sizeof(detail), ZT_(dev()->soc_entry), app.cpu_gov);
 	y = zmc_entry(cr, y, "processor", detail, ACT_OPEN_PAGE, PAGE_CPU);
 
-	snprintf(detail, sizeof(detail), "3.5 GB RAM, swappiness %d", app.swappiness);
+	snprintf(detail, sizeof(detail), "%s, swappiness %d", dev()->ram, app.swappiness);
 	y = zmc_entry(cr, y, "virtual memory", detail, ACT_OPEN_PAGE, PAGE_VM);
 
-	snprintf(detail, sizeof(detail), "Mali-G72 MP18 (%s), 60 FPS", app.gpu_gov);
+	snprintf(detail, sizeof(detail), dev()->gpu_entry, app.gpu_gov);
 	y = zmc_entry(cr, y, "graphics", detail, ACT_OPEN_PAGE, PAGE_GPU);
 
 	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
@@ -3390,7 +3448,7 @@ static double draw_battery(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Battery information", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "3000 mAh Li-Ion, Health Good", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	zmc_text(cr, dev()->battery, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 
 	return y + 60;
 }
@@ -3398,34 +3456,33 @@ static double draw_battery(cairo_t *cr) {
 static double draw_cpu(cairo_t *cr) {
 	double y = zmc_header(cr, "processor");
 
-	char p0_f[32], p4_f[32], load[64];
-	read_sys_file("/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq", p0_f, sizeof(p0_f));
-	read_sys_file("/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq", p4_f, sizeof(p4_f));
+	char load[64];
 	read_sys_file("/proc/loadavg", load, sizeof(load));
-	double f0 = p0_f[0] ? atoi(p0_f) / 1000.0 : 1794.0;
-	double f4 = p4_f[0] ? atoi(p4_f) / 1000.0 : 2704.0;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "SoC Architecture", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Samsung Exynos 9810 (10nm LPP)", FONT_SEMILIGHT, 20, MARGIN, y + 18, 0);
+	zmc_text(cr, dev()->soc, FONT_SEMILIGHT, 20, MARGIN, y + 18, 0);
 	y += 56;
 
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "LITTLE Cluster (Cores 0-3, Cortex-A55)", FONT_REGULAR, 13, MARGIN, y, 0);
-	char c0_str[64];
-	snprintf(c0_str, sizeof(c0_str), "%.0f MHz (350 - 1794 MHz)", f0);
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, c0_str, FONT_REGULAR, 16, MARGIN, y + 20, 0);
-	y += 52;
-
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "BIG Cluster (Cores 4-7, M3 Cheetah)", FONT_REGULAR, 13, MARGIN, y, 0);
-	char c4_str[64];
-	snprintf(c4_str, sizeof(c4_str), "%.0f MHz (400 - 2704 MHz)", f4);
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, c4_str, FONT_REGULAR, 16, MARGIN, y + 20, 0);
-	y += 52;
+	for (int i = 0; i < 3 && dev()->cl[i].label; i++) {
+		const struct dev_cluster *c = &dev()->cl[i];
+		char f[32], line[64];
+		read_sys_file(c->freq, f, sizeof(f));
+		if (c->range) {
+			/* the S9's line: its reading, or its top speed */
+			snprintf(line, sizeof(line), "%.0f MHz (%s)", f[0] ? atoi(f) / 1000.0 : c->fallback, c->range);
+		} else if (f[0]) {
+			snprintf(line, sizeof(line), ZT_("%.0f MHz (up to %d MHz)"), atoi(f) / 1000.0, c->max_mhz);
+		} else {
+			snprintf(line, sizeof(line), ZT_("up to %d MHz"), c->max_mhz);
+		}
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, c->label, FONT_REGULAR, 13, MARGIN, y, 0);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		zmc_text(cr, line, FONT_REGULAR, 16, MARGIN, y + 20, 0);
+		y += 52;
+	}
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "CPU Governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -3452,7 +3509,7 @@ static double draw_vm(cairo_t *cr) {
 	double used_ram = total_ram - free_ram;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Physical Memory (LPDDR4X)", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, dev()->ram_kind, FONT_REGULAR, 13, MARGIN, y, 0);
 	char ram_str[64];
 	snprintf(ram_str, sizeof(ram_str), ZT_("%.2f GB used of %.2f GB"), used_ram, total_ram);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -3470,7 +3527,7 @@ static double draw_vm(cairo_t *cr) {
 		double total_disk = (double)fs.f_blocks * fs.f_frsize / 1e9;
 		double free_disk = (double)fs.f_bavail * fs.f_frsize / 1e9;
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		zmc_text(cr, "UFS 2.1 Storage", FONT_REGULAR, 13, MARGIN, y, 0);
+		zmc_text(cr, dev()->storage, FONT_REGULAR, 13, MARGIN, y, 0);
 		char disk_str[64];
 		snprintf(disk_str, sizeof(disk_str), ZT_("%.1f GB free of %.1f GB"), free_disk, total_disk);
 		cairo_set_source_rgb(cr, 1, 1, 1);
@@ -3491,13 +3548,19 @@ static double draw_gpu(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "GPU Engine", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "ARM Mali-G72 MP18 (Bifrost)", FONT_SEMILIGHT, 21, MARGIN, y + 18, 0);
+	zmc_text(cr, dev()->gpu, FONT_SEMILIGHT, 21, MARGIN, y + 18, 0);
 	y += 56;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Clock frequency", FONT_REGULAR, 13, MARGIN, y, 0);
 	char f_str[64];
-	snprintf(f_str, sizeof(f_str), "%.0f MHz (260, 455, 572 MHz)", mhz);
+	if (dev()->gpu_freqs) {
+		snprintf(f_str, sizeof(f_str), "%.0f MHz (%s)", mhz, dev()->gpu_freqs);
+	} else if (cur_f[0]) {
+		snprintf(f_str, sizeof(f_str), ZT_("%.0f MHz (up to %d MHz)"), mhz, dev()->gpu_max);
+	} else {
+		snprintf(f_str, sizeof(f_str), ZT_("up to %d MHz"), dev()->gpu_max);
+	}
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, f_str, FONT_REGULAR, 16, MARGIN, y + 20, 0);
 	y += 52;
@@ -3512,7 +3575,7 @@ static double draw_gpu(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Display Hardware", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Super AMOLED 1440x2960 @ 60.00 Hz", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	zmc_text(cr, dev()->display, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 	y += 52;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);

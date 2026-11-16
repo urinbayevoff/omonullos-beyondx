@@ -47,6 +47,8 @@
  *   selection is served (wlr_primary_selection_v1), so its askers are answered.
  * Modified for OmonullOS, November 2026: without Segoe UI Symbol the Windows Phone apps' tiles
  *   draw our own line glyphs instead of the app's initial (draw_glyph).
+ * Modified for OmonullOS, November 2026: "prox near|far" from zcell: the screen dark for the
+ *   ear in a call (the touch IC's ear detection), without the lock.
  * Modified for OmonullOS, November 2026: nav_style = line: an iPhone-like line on a thin strip of
  *   frosted glass instead of the three buttons; swipe up for Start, rest on the way for the
  *   switcher, along the line right for the app before and left to come back (the order kept
@@ -207,10 +209,11 @@ static int line_ink_accent;	/* nav_line_color = accent: follows the accent */
 #define LINE_KEY_RISE	24	/* up from the bottom edge over the keyboard this far: the line's after all */
 #define SEARCH_PULL	80	/* Start pulled down past its top this far: the search */
 /* Over the line the apps stop this far above the bottom edge, and the room
- * below them is filled with their own bottom row stretched down (app_strip):
- * the app's colour goes on to the edge, and its last line of text or its
- * buttons are not under the pill. */
+ * below them is filled with the colour of their bottom row, taken STRIP_IN
+ * points in from its left edge (app_strip): the app's colour goes on to the
+ * edge, and its last line of text or its buttons are not under the pill. */
 #define LINE_SAFE	18
+#define STRIP_IN	4
 #define SAFE_AREA_MAX 16	/* apps that may say "safe area ID" */
 static bool nav_bar_on = true;
 static int nav_style;		/* 0 the buttons, 1 the line */
@@ -462,8 +465,11 @@ struct zt_toplevel {
 	 * start-up work never shares the processor with an animation on screen */
 	bool awaiting;
 	uint32_t awaiting_since;
-	int sent_h;		/* the height it was last asked to take */
-	bool wants_full;	/* OmonullOS: it asked for the whole screen (a video, a game) */
+	int sent_w, sent_h;	/* the size it was last asked to take */
+	/* OmonullOS: it asked for the whole screen (a video, a game): it gets
+	 * all of it on its side, the phone's left side down (app_full_now) */
+	bool wants_full;
+	bool sent_full;		/* it was last told it has it */
 	struct wl_listener map, unmap, commit, destroy, request_fullscreen;
 };
 
@@ -699,6 +705,7 @@ struct zt_server {
 	cairo_surface_t *lock_wall;
 	bool locked;
 	bool call_over_lock;	/* only the phone call may cover the lock */
+	bool prox_dark;	/* dark only for the ear in a call (zcell's "prox near") */
 	/* app switcher: the apps as a row of cards, newest on the right */
 	bool switcher;
 	float switch_t;			/* 0 the app at full size, 1 cards */
@@ -7918,19 +7925,49 @@ static void osk_lift(struct zt_server *server) {
 
 /* Some apps will not go as narrow as the screen (a browser stops at 450
  * points or so). Such a window is shown smaller, so that all of it is there. */
+/* OmonullOS: an app is shown on its side when what it drew is wider than
+ * tall and than the screen: the shape it was given for the whole screen
+ * (app_configure). Going by its picture, not by the ask, it is never shown
+ * turned the wrong way for the frame or two before it answers. */
+static bool app_on_side(struct zt_server *server, struct zt_toplevel *toplevel) {
+	struct wlr_box *geo = &toplevel->xdg_toplevel->base->geometry;
+	return geo->width > geo->height && geo->width > server->width;
+}
+
 static double app_fit(struct zt_server *server, struct zt_toplevel *toplevel) {
 	int w = toplevel->xdg_toplevel->base->geometry.width;
-	return w > server->width ? (double)server->width / w : 1.0;
+	/* on its side, across is the screen's height */
+	int across = toplevel->wants_full || app_on_side(server, toplevel) ? server->height : server->width;
+	return w > across ? (double)across / w : 1.0;
+}
+
+/* The app in front has the whole screen on its side, and nothing of the
+ * shell's is over it: no status bar, no line (the line's swipe and the edges
+ * still work, so an app that never lets go can be left) */
+static bool app_full_now(struct zt_server *server) {
+	return server->shown && server->shown->mapped && app_on_side(server, server->shown) &&
+		!server->locked && server->switch_t <= 0.001f;
 }
 
 /* Ask an app for the room it has. Shown smaller, it has to be taller by as
  * much to reach the bottom. */
 static void app_configure(struct zt_server *server, struct zt_toplevel *toplevel) {
-	double room = toplevel == server->shown ? app_height(server) : app_room(server, toplevel);
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;
+	}
+	bool full = toplevel->wants_full;
+	double room = full ? server->width :
+		toplevel == server->shown ? app_height(server) : app_room(server, toplevel);
+	int w = full ? server->height : server->width;
 	int h = (int)(room / app_fit(server, toplevel));
-	if (h != toplevel->sent_h && toplevel->xdg_toplevel->base->initialized) {
+	if (w != toplevel->sent_w || h != toplevel->sent_h) {
+		toplevel->sent_w = w;
 		toplevel->sent_h = h;
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, h);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
+	}
+	if (full != toplevel->sent_full) {
+		toplevel->sent_full = full;
+		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, full);
 	}
 }
 
@@ -9693,12 +9730,16 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	if (toplevel->xdg_toplevel->base->initial_commit) {
 		/* Every app gets the whole app area, and is told it is maximised so
 		 * it draws no shadows or resize borders. */
+		toplevel->sent_w = server->width;
 		toplevel->sent_h = (int)app_room(server, toplevel);
 		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, toplevel->sent_h);
 		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
 		wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel,
 			WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
 		apply_decoration(server, toplevel->xdg_toplevel);
+		if (toplevel->wants_full) {
+			app_configure(server, toplevel);	/* asked for before its first commit */
+		}
 	} else {
 		/* it may have come out wider than it was asked to be */
 		app_configure(server, toplevel);
@@ -9724,8 +9765,11 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	free(toplevel);
 }
 
-/* OmonullOS: an app asks for the whole screen. It keeps the room it has
- * (the status bar stays), but the line goes when it is left alone. */
+/* OmonullOS: an app asks for the whole screen (a video's full-screen
+ * button), or gives it back. It gets all of it on its side, the phone's left
+ * side down, with no status bar or line over it, until it gives it back (its
+ * button, Back) — the S10 has no sensor to say how it is held. (After
+ * madesh-ops/ztOS b5918a6, which turns it with the accelerometer.) */
 static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
 	struct zt_server *server = toplevel->server;
@@ -9733,9 +9777,12 @@ static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *
 	wlr_log(WLR_INFO, "'%s' %s the whole screen", app_name(toplevel),
 		toplevel->wants_full ? "asks for" : "no longer wants");
 	if (toplevel->xdg_toplevel->base->initialized) {
+		app_configure(server, toplevel);
+		/* (an answer every time, even when nothing changed) */
 		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
 	}
 	line_wake(server);
+	damage(server);
 }
 
 static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
@@ -9769,11 +9816,12 @@ static void xdg_popup_commit(struct wl_listener *listener, void *data) {
 		if (server->shown && server->width > 0 && popup->xdg_popup->parent) {
 			double ox, oy, fit = app_fit(server, server->shown);
 			app_origin(server->shown, &ox, &oy);
+			bool side = app_on_side(server, server->shown);	/* the whole screen, turned */
 			struct wlr_box box = {
 				.x = (int)-ox,
 				.y = (int)(STATUS_H - oy),
-				.width = (int)(server->width / fit),
-				.height = (int)(app_room(server, server->shown) / fit),
+				.width = (int)((side ? server->height : server->width) / fit),
+				.height = (int)((side ? server->width : app_room(server, server->shown)) / fit),
 			};
 			wlr_xdg_popup_unconstrain_from_box(popup->xdg_popup, &box);
 		}
@@ -9987,6 +10035,11 @@ static struct wlr_surface *surface_at(struct zt_server *server, double x, double
 	}
 	double ox, oy, fit = app_fit(server, server->shown);
 	app_origin(server->shown, &ox, &oy);
+	if (app_on_side(server, server->shown)) {
+		/* on its side: its top is the screen's right edge (draw_app_surface) */
+		return wlr_xdg_surface_surface_at(server->shown->xdg_toplevel->base,
+			y / fit - ox, (server->width - x) / fit + STATUS_H - oy, sx, sy);
+	}
 	return wlr_xdg_surface_surface_at(server->shown->xdg_toplevel->base,
 		x / fit - ox, (y + server->app_lift - STATUS_H) / fit + STATUS_H - oy, sx, sy);
 }
@@ -11604,13 +11657,18 @@ static void tone_rgb(int kelvin, float rgb[3]) {
 }
 
 /* Switch the display itself off or on. Off, nothing is drawn and no frames
- * are scheduled; the power key brings it back. */
-static void screen_set(struct zt_server *server, bool on) {
+ * are scheduled; the power key brings it back. `ear`: only for the ear in a
+ * call (zcell's "prox near|far", the touch IC's ear detection): no lock and
+ * its sound, Waydroid, zrnperfd and Wi-Fi left as they are. */
+static void screen_set_how(struct zt_server *server, bool on, bool ear) {
 	if (!on) {
 		server->dm_hidden = 1;	/* the DotMatrix home boots again when it is next seen */
 	}
 	if (!server->output || server->screen_on == on) {
-		return;
+		return;	/* (the idle timer while the ear keeps it dark: still the ear's) */
+	}
+	if (!ear) {
+		server->prox_dark = false;	/* the power key took over */
 	}
 	/* nested, a disabled output is the window gone, with nothing left to
 	 * wake it; and the Waydroid freeze below is not this machine's */
@@ -11620,6 +11678,9 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	if (!on && server->auth_active) auth_finish(server);
 	bool demoloop = demoloop_active();
+	if (ear) {
+		/* nothing below the output itself */
+	} else
 	/* Freeze completes before the display-off transition can let zrn-sleepd
 	 * enter SoC sleep. The configured keep_awake list is honored by the helper. */
 	if (!on && !demoloop) {
@@ -11643,7 +11704,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		waydroid_power_request(demoloop || (waydroid_window(id) && !locking) ? "active" : "idle");
 		run_detached("ztos-waydroid-power", "sync", NULL, NULL);
 	}
-	if (on) {
+	if (on && !ear) {
 		perf_tell("screen on\n");	/* clocks back up before the first frame */
 	}
 	struct wlr_output_state state;
@@ -11669,8 +11730,8 @@ static void screen_set(struct zt_server *server, bool on) {
 			backlight_set(server->shade_brightness);
 		}
 	}
-	wlr_log(WLR_INFO, "screen %s", on ? "on" : "off");
-	if (!on) {
+	wlr_log(WLR_INFO, "screen %s%s", on ? "on" : "off", ear ? " (ear)" : "");
+	if (!on && !ear) {
 		/* locked as it goes dark (lock() itself runs as it comes back on,
 		 * and waking is silent) */
 		ui_sound(server, UIS_LOCK);
@@ -11691,10 +11752,16 @@ static void screen_set(struct zt_server *server, bool on) {
 		server->idle_armed_ms = 0;
 		wl_event_source_timer_update(server->net_timer, 1000);
 		draw_status(server);	/* the clock moved on while it slept */
-		shade_set_open(server, false);
-		lock(server);
+		if (!ear) {
+			shade_set_open(server, false);
+			lock(server);
+		}
 		damage(server);
 	}
+}
+
+static void screen_set(struct zt_server *server, bool on) {
+	screen_set_how(server, on, false);
 }
 
 /* Something was touched or pressed: put the sleep timer back to the start.
@@ -12613,7 +12680,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		damage(server);
 		return;
 	}
-	if (!server->shade_open && y <= STATUS_H + 12) {
+	if (!server->shade_open && y <= STATUS_H + 12 && !app_full_now(server)) {
 		/* pulling it down: bring its contents up to date once, now */
 		p->role = ROLE_SHADE;
 		p->index = -1;
@@ -13106,9 +13173,15 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		if (!p->moved && server->shown && is_terminal(server->shown)) {
 			break;
 		}
-		/* Coordinates stay relative to the surface the finger went down on. */
-		wlr_seat_touch_notify_motion(server->seat, time, id,
-			p->ox + (x - p->x0) / p->fit, p->oy + (y - p->y0) / p->fit);
+		/* Coordinates stay relative to the surface the finger went down on
+		 * (on its side, the app's x is the screen's y) */
+		if (server->shown && app_on_side(server, server->shown)) {
+			wlr_seat_touch_notify_motion(server->seat, time, id,
+				p->ox + (y - p->y0) / p->fit, p->oy - (x - p->x0) / p->fit);
+		} else {
+			wlr_seat_touch_notify_motion(server->seat, time, id,
+				p->ox + (x - p->x0) / p->fit, p->oy + (y - p->y0) / p->fit);
+		}
 		wlr_seat_touch_notify_frame(server->seat);
 		break;
 	case ROLE_HYPER:
@@ -14147,6 +14220,19 @@ static void ctl_command(struct zt_server *server, char *line) {
 		/* a new display size: greetd starts the session again at it */
 		wlr_log(WLR_INFO, "restart asked for");
 		wl_display_terminate(server->wl_display);
+	} else if (!strcmp(line, "prox near")) {
+		/* the ear on the glass in a call: dark, and the glass does nothing
+		 * while dark (touch_down returns); only if it was lit */
+		if (server->screen_on) {
+			screen_set_how(server, false, true);
+			server->prox_dark = !server->screen_on;
+		}
+	} else if (!strcmp(line, "prox far")) {
+		if (server->prox_dark && !server->screen_on) {
+			screen_set_how(server, true, true);
+			activity(server);
+		}
+		server->prox_dark = false;
 	} else if (strncmp(line, "screen off", 10) == 0) {
 		screen_set(server, false);
 	} else if (strncmp(line, "screen on", 9) == 0) {
@@ -14541,6 +14627,7 @@ struct app_draw {
 	double ox, oy, fit;
 	float x, y, scale;	/* where the app area's corner goes, and how large */
 	float angle, alpha;
+	bool full;	/* the app has the whole screen, on its side (app_draw_all) */
 	struct timespec when;
 };
 
@@ -14560,7 +14647,20 @@ static void draw_app_surface(struct wlr_surface *surface, int sx, int sy, void *
 	mat_identity(m);
 	mat_rotate_y(m, draw->angle);	/* round the screen's left edge */
 	mat_translate(m, draw->x, draw->y);
-	mat_scale(m, (float)draw->fit * draw->scale, (float)draw->fit * draw->scale);	/* about the app area's corner */
+	mat_scale(m, draw->scale, draw->scale);	/* about the app area's corner */
+	if (draw->full) {
+		/* on its side, the phone's left side down: from the top of the
+		 * screen (no status bar), its top along the screen's right edge,
+		 * so the app's (u, v) is the screen's (width - v, u) */
+		mat_translate(m, 0, -(float)STATUS_H);
+		float t[16];
+		mat_identity(t);
+		t[0] = 0; t[1] = 1;
+		t[4] = -1; t[5] = 0;
+		t[12] = (float)server->width;
+		mat_mul(m, m, t);
+	}
+	mat_scale(m, (float)draw->fit, (float)draw->fit);
 	mat_translate(m, (float)(draw->ox + sx), (float)(draw->oy - STATUS_H + sy));
 	mat_scale(m, surface->current.width, surface->current.height);
 	/* The part of its buffer the surface shows (wp_viewport): all of it,
@@ -14580,12 +14680,12 @@ static void draw_app_surface(struct wlr_surface *surface, int sx, int sy, void *
 }
 
 /* OmonullOS: below an app that stops short of the bottom edge (LINE_SAFE),
- * its own bottom row stretched down to the edge: a strip of its colour that
- * changes with it, so no seam shows. Drawn with the app wherever it goes
+ * a strip of the colour at the start of its bottom row, down to the edge: it
+ * changes with the app, so no seam shows. Drawn with the app wherever it goes
  * (shrinking under the finger, a card), so it is always one piece. */
 static void app_strip(struct app_draw *draw, struct zt_toplevel *toplevel) {
 	struct zt_server *server = draw->server;
-	if (!NAV_LINE) {
+	if (!NAV_LINE || draw->full) {
 		return;
 	}
 	struct wlr_surface *surface = toplevel->xdg_toplevel->base->surface;
@@ -14620,17 +14720,22 @@ static void app_strip(struct app_draw *draw, struct zt_toplevel *toplevel) {
 	mat_scale(m, (float)draw->fit * draw->scale, (float)draw->fit * draw->scale);
 	mat_translate(m, 0, (float)geo->height);
 	mat_scale(m, (float)geo->width, strip);
-	/* one row of the buffer: the middle of the app's last row of points */
+	/* one point of the buffer: in the app's last row of points, a little in
+	 * from its left edge. Its whole row stretched down was a "barcode" when
+	 * the row held text (a page's last line in Chromium); one point is a
+	 * solid strip in the colour of the app's edge */
 	double row = geo->y + geo->height - 0.5;
-	server->uv_off[0] = (float)((src.x + geo->x * src.width / sw) / bw);
+	double col = geo->x + fmin(STRIP_IN, geo->width / 2.0);
+	server->uv_off[0] = (float)((src.x + col * src.width / sw) / bw);
 	server->uv_off[1] = (float)((src.y + row * src.height / sh) / bh);
 	quad(server, attribs.target, attribs.tex, m, draw->alpha, false, !attribs.has_alpha,
-		(float)(geo->width * src.width / sw / bw), 0.0f);
+		0.0f, 0.0f);
 	server->uv_off[0] = server->uv_off[1] = 0;
 }
 
 /* An app's surfaces, and the strip below it. */
 static void app_draw_all(struct app_draw *draw, struct zt_toplevel *toplevel) {
+	draw->full = app_on_side(draw->server, toplevel);
 	wlr_xdg_surface_for_each_surface(toplevel->xdg_toplevel->base, draw_app_surface, draw);
 	app_strip(draw, toplevel);
 }
@@ -15008,6 +15113,7 @@ static bool plane_pick(struct zt_server *server, struct zt_toplevel *app, const 
 	const char *why = NULL;
 #define PLANE_NO(reason) do { why = reason; goto no; } while (0)
 	if (server->plane_off || getenv("ZTMETRO_NO_PLANE")) PLANE_NO("off");
+	if (app && app_on_side(server, app)) PLANE_NO("on its side");
 	if (NAV_LINE) PLANE_NO("the line's pill is made from the frame");
 	if (!app_covers || !app || !app->mapped) PLANE_NO("no app at rest in front");
 	if (server->peek > 0.001f || server->shade_h > 0.5f || server->splash ||
@@ -15539,10 +15645,11 @@ static void render_frame(struct zt_server *server) {
 	boot_logo_draw(server, now);
 	bool retro_home = (retro_home_shown(server) && !lock_shown) ||
 		(retro_on(server) && server->locked);	/* it has its own status column, as its lock has */
-	if (!retro_home) {
+	bool full = app_full_now(server);	/* the app has the whole screen: no status bar */
+	if (!retro_home && !full) {
 		layer_draw(server, &server->status_layer, 0, 0, 1.0f);
 	}
-	if (server->charging && server->plug_layer.tex && !retro_on(server)) {
+	if (server->charging && server->plug_layer.tex && !retro_on(server) && !full) {
 		float a = server->battery_full ? 1.0f : server->st_plug;
 		if (a > 0.5f) {
 			layer_draw(server, &server->plug_layer, server->plug_x, server->plug_y, 1.0f);
@@ -15648,7 +15755,9 @@ static void render_frame(struct zt_server *server) {
 	/* the nav bar stays on top: the panel comes down behind it */
 	if (!server->sensorhub_fail_screen && !(retro_on(server) && server->locked)) {
 		if (NAV_LINE) {
-			glass_draw(server, output->width, output->height);
+			if (!app_full_now(server)) {
+				glass_draw(server, output->width, output->height);	/* the pill */
+			}
 			if (server->kbd_show > 0.01f) {
 				/* the right-edge hold's sign, above the finger (its upload
 				 * lets go of the GL context: taken again for the frame) */
@@ -16467,6 +16576,14 @@ int main(int argc, char *argv[]) {
 
 	server.wl_display = wl_display_create();
 	server.loop = wl_display_get_event_loop(server.wl_display);
+	if (argc > 1) {
+		/* OmonullOS: anything else (--help) is answered here, before a
+		 * backend is made: run from a terminal in the session, wlroots made
+		 * a window on the shell and its teardown crashed (SIGSEGV in
+		 * wlr_touch_finish) */
+		fprintf(stderr, "usage: ztmetro [--render DIR]\n");
+		return strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0 ? 0 : 2;
+	}
 	server.backend = wlr_backend_autocreate(server.loop, NULL);
 	if (server.backend) {
 		int drm_fd = wlr_backend_get_drm_fd(server.backend);
@@ -16713,6 +16830,19 @@ int main(int argc, char *argv[]) {
 	wl_display_run(server.wl_display);
 
 	wl_display_destroy_clients(server.wl_display);
+	/* OmonullOS: our listeners off what is about to go: wlroots asserts
+	 * that nothing listens to a backend, shell or seat it destroys, and a
+	 * restart asked for (display size, style) ended in SIGABRT, which greetd
+	 * took for a crash (found by cyber-dream/ztOS-miatoll) */
+	wl_list_remove(&server.new_surface.link);
+	wl_list_remove(&server.new_output.link);
+	wl_list_remove(&server.new_xdg_toplevel.link);
+	wl_list_remove(&server.new_xdg_popup.link);
+	wl_list_remove(&server.new_decoration.link);
+	wl_list_remove(&server.new_text_input.link);
+	wl_list_remove(&server.new_input.link);
+	wl_list_remove(&server.request_set_selection.link);
+	wl_list_remove(&server.request_set_primary_selection.link);
 	wlr_allocator_destroy(server.allocator);
 	wlr_renderer_destroy(server.renderer);
 	wlr_backend_destroy(server.backend);

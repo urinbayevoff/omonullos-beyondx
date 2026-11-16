@@ -53,6 +53,7 @@ usr/local/lib/zboot/zrn-modem.ko
 usr/local/lib/zboot/zrn_drb.ko
 usr/local/lib/zboot/pcie-exynos9820-ch1.ko
 usr/local/lib/zboot/tools/snd-zrn-abox-bx.ko
+usr/local/lib/zboot/tools/zrn-s6sy761.ko
 usr/lib/modules/$KVER/extra/pcie-exynos9820.ko
 usr/lib/modules/$KVER/extra/cfg80211.ko
 usr/lib/modules/$KVER/extra/brcmutil.ko
@@ -197,7 +198,7 @@ touch "$R/etc/zgov-sicd.off"
 
 say "beyondx helpers"
 K=$SRC/kernel/beyondx
-for t in ztemp zbatt zcharge zthermal zchg zlowbatt zchgoff zbattlog zpdoff ztouch zgpu zmodem; do
+for t in ztemp zbatt zcharge zthermal zchg zlowbatt zchgoff zbattlog zpdoff ztouch zgpu zmodem zwlan-guard; do
 	install -m755 "$K/$t.sh" "$R/usr/local/bin/$t"
 done
 install -m755 "$K/zacpm.py" "$R/usr/local/bin/zacpm"
@@ -206,6 +207,7 @@ install -m755 "$K/gnome-terminal" "$R/usr/local/bin/gnome-terminal"
 # automatic system sleep (enabled by the overlay's relative link) and the
 # speaker's one-time calibration
 install -m755 "$SRC/scripts/zsleepd.sh" "$R/usr/local/bin/zsleepd"
+install -m755 "$SRC/power/suspend/beyondx/zgpio.py" "$R/usr/local/bin/zgpio"	# zsleepd: charger wake
 install -m755 "$SRC/audio/beyondx/zspk-calibrate.sh" "$R/usr/local/bin/zspk-calibrate"
 install -Dm644 "$K/wdt-pet.sh" "$R/usr/local/lib/zboot/wdt-pet.sh"
 # sound: zaudio.service with the VSS drop-in, as on the phone

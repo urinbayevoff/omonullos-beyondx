@@ -4,7 +4,8 @@
 # WIFI_UNBIND=1 HOTPLUG=1, in a loop: once the screen has been off for DELAY s
 # (RESLEEP s after a wake that left it off: an SMS), with no call, no sound, no
 # USB cable and nothing busy, the phone goes to sleep; the power key, a call or
-# an SMS (CP, wake bit 8) wakes it. Never on a charger (see busy). Tested by hand 14.11 (three 4c runs, amps
+# an SMS (CP, wake bit 8) wakes it, and so does a charger plugged in (MAX77705's
+# INTB, gpa1-6: chg_arm). Never on a charger (see busy). Tested by hand 14.11 (three 4c runs, amps
 # set up again by snd-zrn-abox-bx, zcell lights the screen for a call).
 # No timer wakes it: alarms and timers do not run while it sleeps (owner: none needed).
 # Off switch: /etc/zsleepd.off (looked at every check). Log: /var/lib/zsleep/zsleepd.log,
@@ -14,6 +15,7 @@ DELAY=${DELAY:-30}
 RESLEEP=${RESLEEP:-20}
 TICK=5
 WIFI_PCI=0000:01:00.0
+WIFI_BRIDGE=0000:00:00.0	# its root port
 GADGET=/sys/kernel/config/usb_gadget/zboot
 # the image keeps it with the other boot modules (updates put it there too)
 KO=${KO:-/usr/local/lib/zboot/tools/zrn-system-sleep-bx.ko}
@@ -52,6 +54,15 @@ echo 0x$(awk '$3=="psci_ops"{print $1}' /proc/kallsyms) > $IP/psci_ops
 echo 0x$(awk '$3=="psci_0_2_cpu_off"{print $1}' /proc/kallsyms) > $IP/psci_cpu_off
 echo 1 > $IP/hotplug && echo 1 > $IP/hp_cluster || { say "no hotplug/hp_cluster in zrn-cpuidle-bx"; exit 1; }
 [ "$(cat $P/dry_run)" = Y ] && [ "$(cat $P/prepare_only)" = Y ] || { say "dry_run/prepare_only off: left over from a broken run, refusing"; exit 1; }
+# a charger plugged in wakes it (15.11): the MAX77705's INTB (gpa1-6, EINT bit
+# 14; its USB-C attach interrupt is unmasked) held by zgpio as a falling-edge
+# EINT, its interrupts read clear first so the line is high. Off with CHG_WAKE=0.
+CHG_WAKE=${CHG_WAKE:-1}
+ZGPIO=/usr/local/bin/zgpio
+I2C=0
+EINT_KEY=$(( 0xffffffff & ~(1 << 20) ))		# the power key only (the module's default)
+EINT_CHG=$(( 0xffffffff & ~(1 << 20) & ~(1 << 14) ))
+chg_pid=""
 DPMS=$(ls /sys/class/drm/card*-DSI-1/dpms 2>/dev/null | head -1)
 [ -n "$DPMS" ] || { say "no DSI-1 dpms"; exit 1; }
 
@@ -60,6 +71,39 @@ ASYNC=$(cat /sys/power/pm_async)
 say "start: DELAY=$DELAY RESLEEP=$RESLEEP"
 
 screen_off() { [ "$(cat $DPMS)" = Off ]; }
+
+# read clear what the MAX77705 has pending (read-to-clear registers: PMIC
+# INTSRC, SYSTEM_INT, CHG_INT, USB-C UIC/CC/PD/VDM; nothing is written), so
+# INTB goes high and a plug-in is a new falling edge
+max_clear() {
+	local r
+	i2cget -y $I2C 0x66 0x22 >/dev/null 2>&1; i2cget -y $I2C 0x66 0x24 >/dev/null 2>&1
+	i2cget -y $I2C 0x69 0xb0 >/dev/null 2>&1
+	for r in 0x02 0x03 0x04 0x05; do i2cget -y $I2C 0x25 $r >/dev/null 2>&1; done
+}
+
+# arm the charger's wake: 0 armed, 1 not (left to the power key)
+chg_arm() {
+	[ "$CHG_WAKE" = 1 ] && [ -x $ZGPIO ] || return 1
+	local f=/run/zsleepd.intb l
+	max_clear
+	: > $f
+	$ZGPIO hold 1 6 falling > $f 2>&1 &
+	chg_pid=$!
+	for l in 1 2 3 4 5 6 7 8 9 10; do grep -q level $f && break; sleep 0.1; done
+	if grep -q "level 1" $f; then
+		echo $EINT_CHG > $P/eint_wake && return 0
+	fi
+	say "charger wake not armed: $(head -1 $f)"
+	chg_disarm
+	return 1
+}
+
+chg_disarm() {
+	echo $EINT_KEY > $P/eint_wake 2>/dev/null
+	[ -n "$chg_pid" ] && kill $chg_pid 2>/dev/null && wait $chg_pid 2>/dev/null
+	chg_pid=""
+}
 wifi_bound() { [ -e /sys/bus/pci/devices/$WIFI_PCI/driver ]; }
 
 # why it must stay awake now; empty: it may sleep
@@ -86,7 +130,7 @@ busy() {
 }
 
 sleep_once() {
-	local udc="" t0 t1 rc wake why unbound=0
+	local udc="" t0 t1 rc wake why unbound=0 armed=1 intsrc=""
 	echo deep > /sys/power/mem_sleep
 	echo 0 > /sys/power/pm_async
 	if [ -w $GADGET/UDC ]; then
@@ -104,12 +148,16 @@ sleep_once() {
 		why=$(busy)
 	fi
 	if [ -z "$why" ]; then
+		chg_arm; armed=$?
 		echo 0 > $P/dry_run && echo 0 > $P/prepare_only
 		sync
 		t0=$(date +%s.%N)
 		echo mem > /sys/power/state; rc=$?
 		t1=$(date +%s.%N)
 		echo 1 > $P/prepare_only; echo 1 > $P/dry_run
+		# what woke it: INTSRC set = the MAX77705 (a key leaves it 0)
+		intsrc=$(i2cget -y $I2C 0x66 0x22 2>/dev/null)
+		chg_disarm
 	else
 		rc=-1; t0=0; t1=0
 	fi
@@ -118,14 +166,27 @@ sleep_once() {
 		# a function-level reset first: the rebound brcmfmac read a stale RX
 		# ring and oopsed (12.11 13:40). Not slept, the FLR finds the chip gone
 		# (MMIO read failed) but that fails clean; without it, the oops.
+		# the chip's own config as it woke (BAR0, command): 0 = it lost power
+		local cfg; cfg=$(setpci -s $WIFI_PCI BASE_ADDRESS_0 COMMAND 2>/dev/null | tr '\n' ' ')
 		echo 1 > /sys/bus/pci/devices/$WIFI_PCI/reset 2>/dev/null
 		echo $WIFI_PCI > /sys/bus/pci/drivers/brcmfmac/bind 2>/dev/null
+		if ! wifi_bound; then
+			# 15.11 22:21, 16.11 07:48: "MMIO read failed 0xffffffff" after a
+			# wake; the reset saved and put back a config the chip had lost.
+			# Enumerate it afresh, as at boot.
+			say "Wi-Fi bind failed after wake (cfg $cfg): remove + rescan"
+			echo 1 > /sys/bus/pci/devices/$WIFI_PCI/remove 2>/dev/null
+			sleep 1
+			echo 1 > /sys/bus/pci/devices/$WIFI_BRIDGE/rescan 2>/dev/null
+			for i in 1 2 3 4 5 6 7 8 9 10; do wifi_bound && break; sleep 1; done
+			say "Wi-Fi after rescan: $(wifi_bound && echo bound || echo DEAD)"
+		fi
 	fi
 	local wifi=ok; [ -e /sys/bus/pci/devices/$WIFI_PCI/driver ] || wifi=DEAD
 	[ -n "$udc" ] && echo "$udc" > $GADGET/UDC
 	echo s2idle > /sys/power/mem_sleep
 	echo "$ASYNC" > /sys/power/pm_async
-	local touch; touch=$(ls /sys/bus/i2c/drivers/s6sy761/ 2>/dev/null | grep -c 1-0048)
+	local touch=0; [ -e /sys/bus/i2c/devices/1-0048/driver ] && touch=1	# either driver
 	if [ "$rc" = -1 ]; then
 		say "not slept: $why (unbound $unbound, touch $touch wifi $wifi)"
 		return 2
@@ -136,7 +197,10 @@ sleep_once() {
 	if [ "$rc" = 0 ]; then
 		slept=$(awk "BEGIN{printf \"%.0f\", $slept + $d}")
 		fails=0
-		say "slept ${d} s wake=$wake ($( [ "$wake" = 256 ] && echo cp || { [ "$wake" = 4096 ] && echo key || echo other; })) err=$(cat $P/last_error) restore=$(cat $P/last_restore_error) cpus=$(cat /sys/devices/system/cpu/online) touch=$touch wifi=$wifi amps=$(cat $AMP/amp_rescues)/$(cat $AMP/amp_rescue_ret)"
+		local by=other
+		[ "$wake" = 256 ] && by=cp
+		[ "$wake" = 4096 ] && { by=key; [ "$armed" = 0 ] && [ -n "$intsrc" ] && [ "$intsrc" != 0x00 ] && by="charger/usb $intsrc"; }
+		say "slept ${d} s wake=$wake ($by) chg_wake=$([ "$armed" = 0 ] && echo on || echo off) intsrc=${intsrc:-?} err=$(cat $P/last_error) restore=$(cat $P/last_restore_error) cpus=$(cat /sys/devices/system/cpu/online) touch=$touch wifi=$wifi amps=$(cat $AMP/amp_rescues)/$(cat $AMP/amp_rescue_ret)"
 	else
 		fails=$((fails + 1))
 		say "suspend failed rc=$rc after ${d} s: $(cat /sys/power/suspend_stats/last_failed_dev 2>/dev/null | head -1) $(cat /sys/power/suspend_stats/last_failed_step 2>/dev/null | head -1) (fail $fails)"

@@ -40,6 +40,8 @@ say "cpuidle"
 bash "$ROOT/power/idle/beyondx/build.sh"
 say "system sleep"
 bash "$ROOT/power/suspend/beyondx/build.sh"
+say "touch (ear detection)"
+bash "$ROOT/kernel/touch-ed/build.sh"
 say "lastlog"
 rm -rf "$B/lastlog"; cp -r "$ROOT/power/suspend/lastlog" "$B/lastlog"
 make -s -C "$K" O=out-beyondx M="$B/lastlog" ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- modules
@@ -55,6 +57,7 @@ for m in "$B"/gpu-modules/*.ko "$B"/decon-modules/*.ko; do put "$m" "$Z/modules"
 put "$B/zrn-modem.ko" "$Z"; put "$B/zrn_drb.ko" "$Z"; put "$B/pcie-exynos9820-ch1.ko" "$Z"
 put "$B/abox-bx/out/snd-zrn-abox-bx.ko" "$Z/tools"
 put "$B/sleep-bx/zrn-system-sleep-bx.ko" "$Z/tools"	# zsleepd
+put "$B/touch-ed/zrn-s6sy761.ko" "$Z/tools"	# ztouch
 for m in "$B"/wlan-modules/*.ko "$B/reboot-bx/zreboot-bx.ko" "$B/idle-bx/zrn-cpuidle-bx.ko" \
 		"$B/lastlog/zrn-lastlog.ko"; do
 	put "$m" "$X"

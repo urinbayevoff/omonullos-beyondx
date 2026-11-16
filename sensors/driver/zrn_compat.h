@@ -3,6 +3,8 @@
  * What Broadcom's and Samsung's 2018 Android-kernel sources expect and a
  * mainline kernel no longer has (or never had), so that they build here with
  * as few edits as possible. Force-included ahead of every file.
+ *
+ * Modified for OmonullOS, Nov 2026: ZRN_BOARD_BEYONDX picks the S10 5G's patch.
  */
 #ifndef ZRN_COMPAT_H
 #define ZRN_COMPAT_H
@@ -18,8 +20,13 @@
 #include <linux/vmalloc.h>
 #include <linux/gpio/consumer.h>
 
-/* which phone, and which generation of the chip's patch */
+/* which phone, and which generation of the chip's patch (the S10 5G's
+ * build, sensors/beyondx/, passes -DZRN_BOARD_BEYONDX) */
+#ifdef ZRN_BOARD_BEYONDX
+#define CONFIG_SENSORS_SSP_BEYOND 1
+#else
 #define CONFIG_SENSORS_SSP_STAR 1
+#endif
 #define CONFIG_SENSORS_SSP_BBD 1
 #define CONFIG_BCM_GPS_SPI_DRIVER 1
 #define ANDROID_VERSION 90000
