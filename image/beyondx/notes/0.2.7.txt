@@ -7,4 +7,5 @@
 • Sozlamalar: protsessor, xotira, grafika, ekran va batareya sahifalari endi S10 5G'ning özini körsatadi (Exynos 9820, Mali-G76 MP12, 8 GB, 4500 mAh), S9'niki emas.
 • ztMETRO: ekran ölçami yoki uslub özgartirilganda endi qulamasdan, toza qayta işga tuşadi.
 • Ovoz drayveri: ikkala karnay himoya bilan stereo çalişi uçun tayyor (hozircha sozlamasi qölda yoqiladi); qönğiroqda quloq karnayi odatiy balandlikda qoladi.
+• Yangilanişlar ilovasi: endi faqat omonullOS yangilanişlari. Arch paketlarini (pacman) yangilaş tugmasi olib taşlandi — u butun tizimni yangilab, telefonni buzib qöyişi mumkin edi.
 • Telefonni qayta yoqing.

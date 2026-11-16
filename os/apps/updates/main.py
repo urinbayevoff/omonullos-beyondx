@@ -2,10 +2,11 @@
 the work is done by the system (ztos-update, as root, started through systemd),
 this shows how it goes.
 
-Modified for OmonullOS, November 2026: in Uzbek; omonullOS's own signed
-updates first (omonullos-update: version, what is new, install, roll back);
-Arch's packages (ztos-update, pacman -Syu) only behind a warning, as a
-whole-system upgrade would replace our kernel's initramfs and more."""
+Modified for OmonullOS, November 2026: in Uzbek; only omonullOS's own
+signed updates (omonullos-update: version, what is new, install, roll back).
+Arch's packages (ztos-update, pacman -Syu) are no longer offered here
+(16.11, the owner: a user must not break the phone): a whole-system upgrade
+would replace our kernel's initramfs and more. ztos-update itself stays."""
 import json
 import os
 import subprocess
@@ -17,9 +18,6 @@ app = ztos.App()
 # omonullOS (omonullos-update)
 O_STATUS = "/run/omonullos-update/status.json"
 O_VAR = "/var/lib/omonullos-update"
-# Arch packages (upstream ztos-update)
-STATUS = "/run/ztos-update/status"
-LIST = "/var/lib/ztos/updates"
 
 
 def read(path):
@@ -113,17 +111,6 @@ class Home(ztos.Page):
         self.notes = self.text("", size=13, color=ztos.GREY)
         self.notes.setWordWrap(True)
 
-        self.space(24)
-        self.section("tizim paketlari")
-        self.arch_note = self.text("Arch Linux paketlari (pacman). Butun tizimni yangilaydi, bizning "
-                                   "yadro va initramfs bilan buzilişi mumkin.", size=13, color=ztos.GREY)
-        self.arch_note.setWordWrap(True)
-        self.arch_open = self.entry("baribir körsatiş", "ehtiyot böling", self.open_arch)
-        self.arch_state = self.text("", size=13)
-        self.arch_check = self.entry("paketlarni tekşiriş", "", self.arch_check_now)
-        self.arch_install = self.entry("paketlarni yangilaş", "", self.arch_install_now)
-        self.packages = self.text("", size=13, color=ztos.GREY)
-        self.arch_shown = False
 
         self.timer = QTimer(self, interval=700)
         self.timer.timeout.connect(self.refresh)
@@ -156,27 +143,6 @@ class Home(ztos.Page):
         ztos.message("Telefon qayta yoqilsinmi?", "Oçiq ilovalar yopiladi.", ["qayta yoqiş", "bekor qiliş"],
                      lambda choice: choice == 0 and subprocess.Popen(["systemctl", "reboot"]))
 
-    # ---- Arch packages (upstream)
-    def open_arch(self):
-        ztos.message("Tizim paketlari", "pacman -Syu butun tizimni yangilaydi. omonullOSʼning yadrosi va "
-                     "initramfsʼi bizniki: bu yangilaniş ularni buzib, telefon yoqilmay qolişi mumkin. "
-                     "Nima qilayotganingizni bilsangizgina davom eting.", ["körsatiş", "bekor qiliş"],
-                     lambda choice: choice == 0 and self._show_arch())
-
-    def _show_arch(self):
-        self.arch_shown = True
-        self.refresh()
-
-    def arch_check_now(self):
-        if start("ztos-update-check.service"):
-            self.busy(True)
-
-    def arch_install_now(self):
-        ztos.message("Paketlar yangilansinmi?", "Hamma Arch paketlari yuklab olinib örnatiladi. Bu "
-                     "omonullOSʼni buzişi mumkin.", ["yangilaş", "bekor qiliş"],
-                     lambda choice: choice == 0 and start("ztos-update-apply.service"))
-
-    # ---- what is shown
     def refresh(self):
         s = read_json(O_STATUS) or {}
         st = s.get("state", "idle")
@@ -236,30 +202,7 @@ class Home(ztos.Page):
             text = "Yangi versiya bormi, tekşirib köring."
         self.state.setText(text)
 
-        # Arch packages: only after the warning
-        for w in (self.arch_state, self.arch_check, self.arch_install, self.packages):
-            w.setVisible(self.arch_shown)
-        self.arch_open.setVisible(not self.arch_shown)
-        a_working = False
-        if self.arch_shown:
-            words = read(STATUS).split() or ["idle"]
-            a = words[0]
-            updates = [line for line in read(LIST).splitlines() if line.strip()]
-            a_working = a in ("checking", "downloading", "installing")
-            self.arch_check.setVisible(not a_working)
-            self.arch_install.setVisible(bool(updates) and not a_working)
-            self.arch_install.set_detail(f"{len(updates)} ta kutmoqda")
-            if a == "installing" and len(words) >= 3:
-                atext = f"Örnatilmoqda {words[1]} / {words[2]}: {words[3] if len(words) > 3 else ''}"
-            else:
-                atext = {"checking": "Paketlar qidirilmoqda...", "downloading": "Yuklanmoqda...",
-                         "uptodate": "Paketlar yangi.", "available": f"{len(updates)} ta paket yangilaniş mumkin.",
-                         "done": "Paketlar yangilandi.",
-                         "failed": "Bölmadi. Batafsil: /var/log/ztos-update.log"}.get(a, "")
-            self.arch_state.setText(atext)
-            self.packages.setText("\n".join(updates[:60]) + ("\n..." if len(updates) > 60 else "")
-                                  if updates else "")
-        self.busy(working or a_working)
+        self.busy(working)
 
 
 app.run(Home())
