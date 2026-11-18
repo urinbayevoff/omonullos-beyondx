@@ -1,0 +1,58 @@
+# Build rild-lite (modem/ril/rild-lite.c) alone with the NDK, as an artifact:
+# the phone has no NDK (x86_64 prebuilt) and the PC is gone. A push to a
+# branch ril-build* that touches the source starts it (or a new such branch).
+#
+# Added for OmonullOS, November 2026.
+name: Build rild-lite
+
+on:
+  push:
+    branches:
+      - 'ril-build*'
+    paths:
+      - 'modem/ril/rild-lite.c'
+      - 'scripts/bx-ril-build.sh'
+      - '.github/workflows/build-rild-lite.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rild-lite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache NDK
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: build/ndk
+          key: android-ndk-r27c-linux-v1
+
+      - name: Fetch NDK r27c
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p build/ndk
+          wget -q -O build/ndk.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          echo "59c2f6dc96743b5daf5d1626684640b20a6bd2b1d85b13156b90333741bad5cc  build/ndk.zip" | sha256sum -c
+          unzip -q build/ndk.zip -d build/ndk
+          rm build/ndk.zip
+
+      - name: Build
+        run: |
+          NDK_CC=$PWD/build/ndk/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang \
+            sh scripts/bx-ril-build.sh
+          sha256sum build/rild-lite | tee build/rild-lite.sha256
+          echo "commit $GITHUB_SHA" > build/rild-lite.build-info
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rild-lite
+          path: |
+            build/rild-lite
+            build/rild-lite.sha256
+            build/rild-lite.build-info
+          retention-days: 14

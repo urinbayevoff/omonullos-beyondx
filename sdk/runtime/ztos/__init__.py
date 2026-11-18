@@ -1912,10 +1912,12 @@ class Page(QWidget):
         self.viewport.setUpdatesEnabled(True)
         self.viewport.repaint()
         self._quiet = False
-        # The list may have changed while hidden. Do not let the short settling
-        # window discard paints from custom or animated child widgets.
-        self._gl_dirty = True
-        self._version += 1
+        # The list may have changed while hidden (paints of custom or animated
+        # child widgets were held back). Modified for OmonullOS, Nov 2026: not
+        # drawn whole again at every stop (100-180 ms each on the S10 5G, so a
+        # long list stuttered when swiped again); _settle() below has the
+        # page compare its cheap print with the widgets (_verify), and only a
+        # real difference makes the picture again.
         layer = _layer_of(self)
         if layer is not None:
             layer.end("scroll")

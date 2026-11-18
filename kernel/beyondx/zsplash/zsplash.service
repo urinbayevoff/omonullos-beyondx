@@ -1,0 +1,19 @@
+# Added for OmonullOS, November 2026: the boot screen (omonullOS, Powered by
+# Linux, ztOS asosida, then the mark) from the start of user space until
+# ztMETRO runs. Off: touch /etc/zsplash.off. Animation: ZSPLASH_ANIM=1..5 in
+# /etc/zsplash.env (0 = no mark).
+[Unit]
+Description=zboot (Galaxy S10 5G): boot screen
+DefaultDependencies=no
+ConditionPathExists=!/etc/zsplash.off
+
+[Service]
+Type=simple
+Environment=ZSPLASH_ANIM=2
+EnvironmentFile=-/etc/zsplash.env
+ExecStart=/usr/local/bin/zsplash $ZSPLASH_ANIM
+Nice=5
+TimeoutStopSec=2
+
+[Install]
+WantedBy=sysinit.target

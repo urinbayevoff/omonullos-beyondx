@@ -54,6 +54,7 @@ usr/local/lib/zboot/zrn_drb.ko
 usr/local/lib/zboot/pcie-exynos9820-ch1.ko
 usr/local/lib/zboot/tools/snd-zrn-abox-bx.ko
 usr/local/lib/zboot/tools/zrn-s6sy761.ko
+usr/local/lib/zboot/tools/rild-lite
 usr/lib/modules/$KVER/extra/pcie-exynos9820.ko
 usr/lib/modules/$KVER/extra/cfg80211.ko
 usr/lib/modules/$KVER/extra/brcmutil.ko

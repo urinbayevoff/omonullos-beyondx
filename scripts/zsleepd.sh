@@ -180,6 +180,13 @@ sleep_once() {
 			echo 1 > /sys/bus/pci/devices/$WIFI_BRIDGE/rescan 2>/dev/null
 			for i in 1 2 3 4 5 6 7 8 9 10; do wifi_bound && break; sleep 1; done
 			say "Wi-Fi after rescan: $(wifi_bound && echo bound || echo DEAD)"
+			# 17.11 17:14: still DEAD after the rescan. A rescan does not
+			# power the chip; zwlan-guard recover cycles WL_REG_ON and
+			# retrains the link, which brought it back on 13:11 the same day.
+			if ! wifi_bound && [ -x /usr/local/bin/zwlan-guard ]; then
+				/usr/local/bin/zwlan-guard recover >/dev/null 2>&1
+				say "Wi-Fi after zwlan-guard recover: $(wifi_bound && echo bound || echo DEAD)"
+			fi
 		fi
 	fi
 	local wifi=ok; [ -e /sys/bus/pci/devices/$WIFI_PCI/driver ] || wifi=DEAD

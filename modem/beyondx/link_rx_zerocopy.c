@@ -10,6 +10,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
+ * Modified for OmonullOS, November 2026: copies only, no DMA API on the
+ * no-map zero-copy buffers (shm_zmb_dma_addr).
  */
 
 #include <soc/samsung/exynos-modem-ctrl.h>
@@ -63,7 +65,8 @@ static u8 *data_offset_to_buffer(u64 offset, struct sbd_ring_buffer *rb)
 		mif_err("kfifo_avail:%d\n", kfifo_avail(&zdptr->fifo));
 		return NULL;
 	}
-	dma_unmap_single(dev, dma_addr, MIF_BUFF_DEFAULT_CELL_SIZE, DMA_FROM_DEVICE);
+	/* (no-map memory mapped without the cache: nothing to unmap, see
+	 * shm_zmb_dma_addr) */
 
 	return buf;
 }
@@ -218,10 +221,8 @@ int setup_zerocopy_adaptor(struct sbd_ipc_device *ipc_dev)
 		dma_addr_t dma_addr;
 
 		while (kfifo_out_spinlocked(&zdptr->fifo, &dma_addr, sizeof(dma_addr),
-						&zdptr->lock_kfifo) == sizeof(dma_addr)) {
-			dma_unmap_single(dev, dma_addr, MIF_BUFF_DEFAULT_CELL_SIZE,
-									DMA_FROM_DEVICE);
-		}
+						&zdptr->lock_kfifo) == sizeof(dma_addr))
+			;	/* (nothing was mapped: shm_zmb_dma_addr) */
 
 		kfifo_free(&zdptr->fifo);
 	}
@@ -262,24 +263,6 @@ static inline void set_skb_priv_zerocopy_adaptor(struct sbd_ring_buffer *rb, str
 	}
 }
 
-struct sk_buff *zerocopy_alloc_skb(u8 *buf, unsigned int data_len)
-{
-	struct sk_buff *skb;
-
-	skb = __build_skb(buf, SKB_DATA_ALIGN(data_len + NET_HEADROOM)
-			+ SKB_DATA_ALIGN(sizeof(struct skb_shared_info)));
-
-	if (unlikely(!skb)) {
-		mif_err("skb is null\n");
-		return NULL;
-	}
-
-	skb_reserve(skb, NET_HEADROOM);
-	skb_put(skb, data_len);
-
-	return skb;
-}
-
 struct sk_buff *zerocopy_alloc_skb_with_memcpy(u8 *buf, unsigned int data_len)
 {
 	struct sk_buff *skb;
@@ -316,10 +299,9 @@ struct sk_buff *sbd_pio_rx_zerocopy_adaptor(struct sbd_ring_buffer *rb, int use_
 		return NULL;
 	}
 
-	if (use_memcpy)
-		skb = zerocopy_alloc_skb_with_memcpy(buff, data_len);
-	else
-		skb = zerocopy_alloc_skb(buff, data_len);
+	/* always a copy: an skb over the buffer itself (stock's __build_skb)
+	 * cannot be made here, see zrn_compat.h */
+	skb = zerocopy_alloc_skb_with_memcpy(buff, data_len);
 
 	if (unlikely(!skb)) {
 		mif_err("ERR! Socket buffer doesn't exist\n");
@@ -353,11 +335,11 @@ static u64 buffer_to_data_offset(u8 *buf, struct sbd_ring_buffer *rb)
 	if (buf >= v_zmb && buf < (v_zmb + zmb_size)) {
 		offset = data - v_zmb + sl->shmem_size;
 	} else {
-		mif_err("unexpected buff address : %lx\n", (unsigned long int)virt_to_phys(buf));
+		mif_err("unexpected buff address : %px\n", buf);
 		return -EINVAL;
 	}
 
-	dma_addr = dma_map_single(dev, buf, MIF_BUFF_DEFAULT_CELL_SIZE, DMA_FROM_DEVICE);
+	dma_addr = shm_zmb_dma_addr(buf);	/* (no-map memory: no cache to clean) */
 	kfifo_in_spinlocked(&zdptr->fifo, &dma_addr, sizeof(dma_addr), &zdptr->lock_kfifo);
 
 	return offset;

@@ -33,6 +33,9 @@ MOD=${ZMODEM_KO:-/usr/local/lib/zboot/zrn-modem.ko}
 PCIE1=${ZMODEM_PCIE1_KO:-/usr/local/lib/zboot/pcie-exynos9820-ch1.ko}
 MARK=$V/loading
 part() { readlink -f /dev/disk/by-partlabel/$1; }
+# system/vendor/product: our own HWD3 copies (dual boot, 2026-11-17) so Android
+# may be updated to another firmware without touching the modem; else the partition
+android_src() { f=/var/lib/zandroid/$1-hwd3.img; [ -f "$f" ] && echo "$f" || part $1; }
 
 load() {
 	mkdir -p $V
@@ -66,10 +69,10 @@ root() {
 	# a half-unmounted root (umount -R hit a busy mount) gets rebuilt
 	mountpoint -q $R && umount -Rl $R
 	mkdir -p /mnt/system /mnt/vendor /mnt/product $V/data
-	mountpoint -q /mnt/system || mount -o ro "$(part system)" /mnt/system || return 1
-	mountpoint -q /mnt/vendor || mount -o ro "$(part vendor)" /mnt/vendor || return 1
+	mountpoint -q /mnt/system || mount -o ro "$(android_src system)" /mnt/system || return 1
+	mountpoint -q /mnt/vendor || mount -o ro "$(android_src vendor)" /mnt/vendor || return 1
 	# OMC/CSC (cscfeature: voice capable, network config) is on PRODUCT
-	mountpoint -q /mnt/product || mount -o ro "$(part product)" /mnt/product || return 1
+	mountpoint -q /mnt/product || mount -o ro "$(android_src product)" /mnt/product || return 1
 	mkdir -p $R && mount -t tmpfs -o mode=755,size=1m tmpfs $R
 	mkdir -p $R/system $R/vendor $R/product $R/apex/com.android.runtime $R/dev $R/proc $R/sys \
 		$R/data $R/tmp $R/mnt/vendor/efs $R/mnt/vendor/cpefs
@@ -175,6 +178,12 @@ props)
 ril)
 	load && root || exit 1
 	[ -e /dev/__properties__ ] || { echo "zmodem: start zprops first (zmodem props)" >&2; exit 1; }
+	# an update may not write below /var/lib: the rild-lite it brings goes over
+	# the image's copy, and a rollback, which removes it, brings that one back
+	U=/usr/local/lib/zboot/tools/rild-lite
+	if [ -x $U ] && [ -e $R/data/zril/rild-lite ] && ! mountpoint -q $R/data/zril/rild-lite; then
+		mount --bind $U $R/data/zril/rild-lite || echo "zmodem: $U not mounted" >&2
+	fi
 	export LD_LIBRARY_PATH=/apex/com.android.i18n/lib64:/apex/com.android.runtime/lib64
 	# stock's network_config service first: ro.vendor.radio.default_network
 	# and voice_capable from telephony.prop and the CSC, read by the RIL

@@ -8,12 +8,18 @@
  * (uniLoader's beyond1lte, Mu-Silicium's beyond1lte memory map), and this
  * phone's S-Boot passes s3cfb.bootloaderfb=0xca000000 to the kernel.
  * kernel/uniloader-failsafe.py adds the fallback writes to beyondx_init.
+ * Modified for OmonullOS, November 2026: the boot menu (bootmenu-bx.c) as
+ * late_init when ZBOOT_MENU is defined (uniloader-board.py --menu).
  */
 
 #include <board.h>
 #include <util.h>
 #include <drivers/framework.h>
 #include <lib/simplefb.h>
+
+#ifdef ZBOOT_MENU
+#include "bootmenu-bx.c"
+#endif
 
 #define DECON_F_BASE		0x19030000
 #define HW_SW_TRIG_CONTROL	0x70
@@ -42,6 +48,9 @@ struct board_data board_ops = {
 	.name = "samsung-beyondx",
 	.ops = {
 		.early_init = beyondx_init,
+#ifdef ZBOOT_MENU
+		.late_init = bx_boot_menu,
+#endif
 	},
 	.devices = beyondx_devices,
 	.num_devices = ARRAY_SIZE(beyondx_devices),

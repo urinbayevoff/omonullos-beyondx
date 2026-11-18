@@ -38,6 +38,8 @@
  *   hand-drawn vector (a keyboard one added for the nav bar), not a missing-glyph box.
  * Modified for OmonullOS, November 2026: ZTMETRO_CUTOUT waits for the output's scale (BETA-1.1
  *   starts it at 0: the status bar went endless, the screen black but for the nav bar).
+ * Modified for OmonullOS, November 2026: the splash is on the screen first; the rest of the
+ *   output's setup (pictures, tiles, app list) comes after its first frame.
  * Modified for OmonullOS, November 2026: with no second buffer for the output, a frame goes into
  *   the shown one after three tries (the S10's DECON memory holds one; it waited, black, for good).
  * Modified for OmonullOS, October 2026: a tap on a field that kept its focus brings the
@@ -47,6 +49,8 @@
  *   selection is served (wlr_primary_selection_v1), so its askers are answered.
  * Modified for OmonullOS, November 2026: without Segoe UI Symbol the Windows Phone apps' tiles
  *   draw our own line glyphs instead of the app's initial (draw_glyph).
+ * Modified for OmonullOS, November 2026: the splash shows the boot screen's mark (zsplash) in
+ *   place of the name, so the boot goes logo -> lock screen without the name coming back.
  * Modified for OmonullOS, November 2026: "prox near|far" from zcell: the screen dark for the
  *   ear in a call (the touch IC's ear detection), without the lock.
  * Modified for OmonullOS, November 2026: nav_style = line: an iPhone-like line on a thin strip of
@@ -894,6 +898,9 @@ struct zt_server {
 	bool boot_skip_sensorhub;
 	struct zt_layer sensorhub_fail_layer;
 	struct wl_event_source *boot_check_timer;
+	/* the rest of the screen's setup, after the splash's first frame */
+	bool boot_rest_pending;
+	struct wl_event_source *boot_rest_timer;
 	int boot_check_count;
 	uint32_t boot_wait_started_ms;
 
@@ -7273,6 +7280,37 @@ static void boot_logo_prepare(struct zt_server *server) {
 	wlr_log(WLR_INFO, "boot logo: prepared");
 }
 
+/* OmonullOS: the boot screen's mark as it ends there (kernel/beyondx/zsplash/
+ * zsplash.c, keep in step): a window pane in perspective, cracked in three,
+ * in the middle of the screen. Points. */
+static void draw_boot_mark(cairo_t *cr, double cx, double cy) {
+	static const double part[3][5][2] = {
+		{{-1, -1}, {0.15, -1}, {-0.2, 0.1}, {-1, 0.35}, {0, 0}},
+		{{0.15, -1}, {1, -1}, {1, 0.5}, {-0.2, 0.1}, {0, 0}},
+		{{-1, 0.35}, {-0.2, 0.1}, {1, 0.5}, {1, 1}, {-1, 1}},
+	};
+	static const int npt[3] = {4, 4, 5};
+	static const double off[3][2] = {{-3.5, -2.5}, {3.5, -1.5}, {0, 4}};
+	static const double shade[3] = {1.0, 0.8, 0.9};
+	const double r = 38.0;
+	cairo_save(cr);
+	cairo_translate(cr, cx, cy);
+	cairo_scale(cr, 1.45, 1.45);
+	cairo_matrix_t sh;
+	cairo_matrix_init(&sh, 1, -0.18, 0, 1, 0, 0);
+	cairo_transform(cr, &sh);
+	for (int i = 0; i < 3; i++) {
+		for (int k = 0; k < npt[i]; k++) {
+			double x = part[i][k][0] * r + off[i][0], y = part[i][k][1] * r + off[i][1];
+			if (k == 0) cairo_move_to(cr, x, y); else cairo_line_to(cr, x, y);
+		}
+		cairo_close_path(cr);
+		cairo_set_source_rgb(cr, 0x1b / 255.0 * shade[i], 0xa1 / 255.0 * shade[i], 0xe2 / 255.0 * shade[i]);
+		cairo_fill(cr);
+	}
+	cairo_restore(cr);
+}
+
 static void draw_splash(struct zt_server *server) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, server->height, &cr);
@@ -7290,11 +7328,13 @@ static void draw_splash(struct zt_server *server) {
 		free(buf);
 		dm_screen_finish(&field);
 	} else {
-		/* omonullOS logo: thin text, white on black; "Powered by Linux" at the foot, as Android does */
-		cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-		draw_text(cr, "omonullOS", FONT_LIGHT, 56.0, 0, 0, server->width, server->height, true);
+		/* OmonullOS: the boot screen's last picture (zsplash): the mark in the
+		 * middle, "Powered by Linux" and "ztOS asosida" at the foot, as Android does */
+		draw_boot_mark(cr, server->width / 2.0, server->height / 2.0);
 		cairo_set_source_rgb(cr, 0.75, 0.75, 0.75);
 		draw_text(cr, "Powered by Linux", FONT_REGULAR, 14.0, 0, server->height - 80, server->width, 30, true);
+		cairo_set_source_rgb(cr, 0.47, 0.47, 0.47);
+		draw_text(cr, "ztOS asosida", FONT_REGULAR, 10.0, 0, server->height - 54, server->width, 22, true);
 	}
 
 	zt_buffer_show(server, &server->splash_layer, buffer, cr, server->width, server->height);
@@ -16035,6 +16075,18 @@ static void render_frame(struct zt_server *server) {
 	}
 }
 
+static void boot_rest(struct zt_server *server);
+static void boot_rest_idle(void *data) {
+	boot_rest(data);
+}
+static int boot_rest_fallback(void *data) {
+	struct zt_server *server = data;
+	wl_event_source_remove(server->boot_rest_timer);
+	server->boot_rest_timer = NULL;
+	boot_rest(server);
+	return 0;
+}
+
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct zt_output *output = wl_container_of(listener, output, frame);
 	struct zt_server *server = output->server;
@@ -16046,6 +16098,10 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	/* nothing damaged and nothing moving: no frame, and no further wake-ups */
 	if (server->dirty || server->moving || app_live || loading_active(server) || animating(server, NULL)) {
 		render_frame(server);
+		if (server->boot_rest_pending) {
+			/* runs once: boot_rest clears the flag */
+			wl_event_loop_add_idle(server->loop, boot_rest_idle, server);
+		}
 	}
 	if (app_live) {
 		wlr_output_schedule_frame(output->wlr_output);
@@ -16177,6 +16233,25 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	server->screen_on = true;
 	damage(server);
 
+	/* OmonullOS, 17.11: the rest (pictures, tiles, the app list: ~2 s) waits
+	 * for the splash's first frame; done here, the panel stayed black from
+	 * the modeset until it was all ready (owner's boot video) */
+	server->boot_rest_pending = true;
+	server->boot_rest_timer = wl_event_loop_add_timer(server->loop, boot_rest_fallback, server);
+	wl_event_source_timer_update(server->boot_rest_timer, 3000);
+}
+
+/* What new_output did after the splash before 17.11; once, from the first
+ * frame (an idle callback, so the frame is on its way first) or after 3 s */
+static void boot_rest(struct zt_server *server) {
+	if (!server->boot_rest_pending) {
+		return;
+	}
+	server->boot_rest_pending = false;
+	if (server->boot_rest_timer) {
+		wl_event_source_remove(server->boot_rest_timer);
+		server->boot_rest_timer = NULL;
+	}
 	load_logo(server);
 	walls_load(server);
 	place_tiles(server);

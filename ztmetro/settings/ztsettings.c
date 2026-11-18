@@ -1319,7 +1319,7 @@ static void wifi_summary(char *out, size_t size) {
 #define APN_FILE "/etc/ztoscorenetworking/apn"
 
 static struct {
-	char sim[16], operator[48], registered[16], tech[8];
+	char sim[16], operator[48], registered[16], tech[8], net_mode[8];
 	bool data, data_on, known;
 } cell;
 static char apn_field[3][102] = { "dialogbb", "", "" };	/* apn, user, password */
@@ -1342,6 +1342,7 @@ static void cell_load(void) {
 		else if (!strcmp(line, "operator")) snprintf(cell.operator, sizeof(cell.operator), "%s", v);
 		else if (!strcmp(line, "registered")) snprintf(cell.registered, sizeof(cell.registered), "%s", v);
 		else if (!strcmp(line, "tech")) snprintf(cell.tech, sizeof(cell.tech), "%s", v);
+		else if (!strcmp(line, "net_mode")) snprintf(cell.net_mode, sizeof(cell.net_mode), "%s", v);
 		else if (!strcmp(line, "data")) cell.data = atoi(v) > 0;
 		else if (!strcmp(line, "data_on")) cell.data_on = atoi(v) > 0;
 	}
@@ -3029,6 +3030,15 @@ static double draw_mobile(cairo_t *cr) {
 		!strcmp(cell.registered, "searching") ? "Searching" :
 		!strcmp(cell.registered, "denied") ? "Refused by the network" : "Not registered");
 
+	/* OmonullOS: zcell reports it; no VoLTE yet, so a call on 4G needs the network's fallback to 3G */
+	if (cell.net_mode[0]) {
+		static const char *const nets[] = { "4G (LTE)", "3G" };
+		y = picker(cr, y, "Network type", nets, 2, strcmp(cell.net_mode, "lte") != 0, ACT_NETWORK_MODE);
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += zmc_text(cr, "If calls do not reach you on 4G, choose 3G.", FONT_REGULAR, 13.5, MARGIN, y,
+			zmc.width - 2 * MARGIN) + 20;
+	}
+
 	snprintf(value, sizeof(value), "%s%s", apn_field[0], apn_field[1][0] ? ZT_(", with a user name") : "");
 	y = zmc_entry(cr, y, "access point", value, ACT_OPEN_PAGE, PAGE_APN);
 	return y + 20;
@@ -4442,6 +4452,8 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_NETWORK_MODE:
 		app.network_mode = arg;
+		snprintf(cell.net_mode, sizeof(cell.net_mode), "%s", arg ? "3g" : "lte");
+		pipe_tell("/run/ztoscorenetworking.ctl", arg ? "net 3g\n" : "net lte\n");
 		break;
 	case ACT_MEDIA_VOL_STEP:
 		app.media_vol = (app.media_vol >= 100) ? 0 : app.media_vol + 20;

@@ -59,6 +59,14 @@
 #                                (kernel/beyondx/pcie), cfg80211 and brcmfmac
 #                                (patch-brcmfmac-4375.py) as modules loaded by
 #                                hand, firmware from firmware/beyondx
+#     --menu                     beyondx: uniLoader's boot menu, OmonullOS / TWRP
+#     --splash                   beyondx: the boot screen from the initramfs on
+#                                (kernel/beyondx/splash.sh); fbcon takes the
+#                                screen only when there is text, and the
+#                                bootloader's empty ramdisk is ignored
+#                                (kernel/beyondx/bootmenu-bx.c); to add it to
+#                                an image on the phone without rebuilding its
+#                                kernel: scripts/rewrap-boot-bx.sh
 #     --root                     beyondx, with --ufs and --pet: no
 #                                zboot.rescue=1; initramfs runs zufs root
 #                                (kernel/beyondx/pre-root.sh) and boots the
@@ -92,7 +100,7 @@ shift
 FALLBACK=		# default per device, below
 DTS_FLAGS=()
 EXTRA=
-UFS=1 ACPM= CPUFREQ= GPU= DECON= WLAN= WLANOPT= BXWLAN= PMDEBUG= USB= MUIC= PET= MEM= SMP= BXUFS= BXROOT= TOUCH= KEYS= GPUOPT= BXGPU= DECONOPT= BXDECON= LOCKUP=
+UFS=1 ACPM= CPUFREQ= GPU= DECON= WLAN= WLANOPT= BXWLAN= PMDEBUG= USB= MUIC= PET= MEM= SMP= BXUFS= BXROOT= BXMENU= SPLASH= TOUCH= KEYS= GPUOPT= BXGPU= DECONOPT= BXDECON= LOCKUP=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--fallback) FALLBACK=$2; shift ;;
@@ -116,6 +124,8 @@ while [ $# -gt 0 ]; do
 	--ufs) BXUFS=1 ;;
 	--root) BXROOT=1 ;;
 	--keys) KEYS=1 ;;
+	--menu) BXMENU=--menu ;;
+	--splash) SPLASH=1 ;;
 	*) echo "unknown option $1" >&2; exit 2 ;;
 	esac
 	shift
@@ -282,8 +292,12 @@ file /bin/busybox $B/busybox-arm64 0755 0 0
 slink /bin/sh busybox 0777 0 0
 file /init $ROOT/initramfs/init 0755 0 0
 EOF
-if [ -n "$USB$PET" ]; then
+if [ -n "$USB$PET$SPLASH" ]; then
 	echo "dir /etc/zboot 0755 0 0" >> "$LIST"
+fi
+if [ -n "$SPLASH" ]; then
+	echo "file /etc/zboot/splash $ROOT/kernel/beyondx/splash.sh 0644 0 0" >> "$LIST"
+	echo "file /etc/zboot/splash.raw.gz $ROOT/kernel/beyondx/splash.raw.gz 0644 0 0" >> "$LIST"
 fi
 if [ -n "$PET" ]; then
 	echo "file /etc/zboot/early $ROOT/kernel/beyondx/wdt-pet.sh 0644 0 0" >> "$LIST"
@@ -488,6 +502,14 @@ else
 	cfg --set-str EXTRA_FIRMWARE ""
 fi
 cfg --set-str INITRAMFS_SOURCE "$LIST"
+if [ -n "$SPLASH" ]; then
+	# fbcon leaves the framebuffer alone until there is text for it (the
+	# rescue shell, a panic), and the boot image's 20-byte empty ramdisk is
+	# not unpacked ("Initramfs unpacking failed: junk at the end", the one
+	# KERN_EMERG line that came through loglevel=1); needs CMDLINE_FORCE
+	cfg --enable FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER
+	cfg --enable INITRAMFS_FORCE
+fi
 cfg --set-val CMA_SIZE_MBYTES 128
 cfg --set-str LOCALVERSION "-zboot"
 # The watchdog is armed by uniLoader and again by the clock-gates node, then
@@ -627,7 +649,7 @@ rm -rf "$STAGE"
 if [ "$DEVICE" = beyondx ]; then
 	cp -r "$ROOT/third_party/uniLoader" "$STAGE"
 	rm -rf "$STAGE/.git"
-	python3 "$ROOT/kernel/beyondx/uniloader-board.py" "$STAGE"
+	python3 "$ROOT/kernel/beyondx/uniloader-board.py" "$STAGE" $BXMENU
 	python3 "$ROOT/kernel/uniloader-failsafe.py" "$STAGE/board/samsung/board-beyondx.c" "$INFORM3"
 	UNILOADER_DEFCONFIG=beyondx_defconfig
 else

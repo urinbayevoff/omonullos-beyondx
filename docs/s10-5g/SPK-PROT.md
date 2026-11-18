@@ -236,3 +236,11 @@ CAL_CHECKSUM, CAL_SET_STATUS**, BDLOG_MAX_TEMP / MAX_EXC / OVER_TEMP_COUNT / OVE
 - Doimiy (egasi «ha»): `/etc/modprobe.d/snd-zrn-abox-bx.conf` = `dsp_cal_r=8786 dsp_cal_r_rcv=7874 amp_dsp=3
   amp_mask=3 dsp_run_reinit=1 dsp_vol_boost=168` (eskisi `.bak-1115-stereo`). 0 dB qilinmaydi.
 - Ochiq: ipeak/vpeak hali 0 (temp modeli ishlaydi); zspk-calibrate faqat pastki karnayni o'lchaydi; drayver OTA'da yo'q.
+
+### 2026-11-18 — zspk-calibrate quloq dinamigini ham o'lchaydi
+
+- `zspk-calibrate [--bot|--rcv|--both] [AMBIENT]` (eb50819, d824857). `--both 23` sinovi (ZSPK_OUT sinov fayliga):
+  pastki **R 8610 = 6.1558 Ω**, quloq **R 8104 = 5.7941 Ω**, ikkalasi status 1, checksum ok, 940 ms.
+  Oldingi o'lchovlar 8786 / 7874 (14–15.11) — farq ~2–3 % (harorat). Jonli qiymatlar reboot'gacha yangisi;
+  boot'da `/etc/modprobe.d/snd-zrn-abox-bx.conf` (8786/7874) ustun — o'zgartirish egasining qarori.
+  O'rnatildi `/usr/local/bin/zspk-calibrate` (eskisi `.bak-1118`).

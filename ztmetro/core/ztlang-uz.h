@@ -201,6 +201,8 @@
 { "Connecting, or no connection yet", "Ulanmoqda yoki hali aloqa yöq" },
 { "Mobile data", "Mobil internet" },
 { "Network", "Tarmoq" },
+{ "Network type", "Tarmoq turi" },
+{ "If calls do not reach you on 4G, choose 3G.", "4Gʼda qönğiroqlar kelmasa, 3Gʼni tanlang." },
 { ", with a user name", ", foydalanuvçi nomi bilan" },
 { "No SIM", "SIM yöq" },
 { "Registration", "Röyxatdan ötiş" },

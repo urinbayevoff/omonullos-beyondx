@@ -40,12 +40,18 @@ LOG=/run/zboot.log
 log() {
 	echo "zboot| $*" > /dev/kmsg 2>/dev/null
 	echo "zboot| $*" > /dev/pmsg0 2>/dev/null	# pstore: survives a reset
-	echo "$(cut -d' ' -f1 /proc/uptime) $*" >> "$LOG"
+	# /proc may be gone (moved to the new root) for a late caller
+	read -r up _ 2>/dev/null < /proc/uptime || up=-
+	echo "$up $*" >> "$LOG"
 }
 
 arg() {
 	sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" /proc/cmdline
 }
+
+# A device's boot screen, first: /etc/zboot/splash (the S10 5G's draws the
+# picture zsplash goes on from; it may send /init's output to $LOG)
+[ -r /etc/zboot/splash ] && . /etc/zboot/splash
 
 log "===== zboot on $(uname -r), $(cat /proc/device-tree/model 2>/dev/null) ====="
 # zboot.kmsgpm=N: the kernel log to pstore pmsg for the first N seconds,

@@ -561,6 +561,19 @@ void __iomem *shm_get_zmb_region(void)
 }
 #endif /* CONFIG_CP_PKTPROC */
 
+/* A zero-copy buffer's bus address: no-map memory, mapped without the cache
+ * (shm_request_region), so the DMA API has nothing to clean or invalidate
+ * for it, and cannot: it is in no struct page. Only kept in the adaptor's
+ * fifo, as stock kept its dma_map_single() result. */
+dma_addr_t shm_zmb_dma_addr(void *v)
+{
+#ifdef CONFIG_CP_LINEAR_WA
+	return (dma_addr_t)(pdata.p_spare_addr + ((u8 *)v - (u8 *)shm_get_zmb_region()));
+#else
+	return (dma_addr_t)(pdata.p_addr + pdata.zmb_off + ((u8 *)v - (u8 *)shm_get_zmb_region()));
+#endif
+}
+
 void __iomem *shm_get_vss_region(void)
 {
 	if (!pdata.v_vss)

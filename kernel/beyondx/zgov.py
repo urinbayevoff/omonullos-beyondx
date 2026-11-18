@@ -62,6 +62,8 @@ JUMP = 0.90		# a core this busy takes the cluster straight to its cap
 BOOST = 1.0		# s at the caps after the last touch
 BOOST_MAX = 5.0		# s, the most a BOOST_SOCK datagram can ask
 BOOST_SOCK = "/run/zgov.boost"
+HOT = "/run/zthermal.hot"	# zthermal at its HARD level: the big clusters at their floor
+BIG = ("cpucl1", "cpucl2")
 ABS_MT_POSITION_X = 0x35
 SICD_SWITCH = "/etc/zgov-sicd"	# deep idle with the screen off only while this exists
 SICD_DELAY = 3.0	# s of screen off before SICD
@@ -252,6 +254,7 @@ def main(argv):
     touch, sock, boost_until = [], None, 0.0
     lit = None		# the screen as last seen: None until the first pass
     dark_since = None	# screen off since (monotonic), until deep idle goes on
+    was_hot = False	# $HOT as last seen
     if not once:
         for c in cl:	# start low; load brings it up within one pass
             request(c, c.levels[0])
@@ -299,7 +302,10 @@ def main(argv):
             boost_until = max(boost_until, t + want)
         boosted = t < boost_until
         if ready and boosted:	# at once, not at the next pass
+            hot = os.path.exists(HOT)
             for c in cl:
+                if hot and c.name in BIG:
+                    continue
                 if c.cur != c.levels[-1]:
                     c.quiet = 0
                     request(c, c.levels[-1])
@@ -324,6 +330,10 @@ def main(argv):
             dark_since = None
             deep_idle(True)
         now = cpu_times()
+        hot = os.path.exists(HOT)
+        if hot != was_hot and not once:
+            was_hot = hot
+            say("hot: cpucl1/cpucl2 at their floor" if hot else "cool again: cpucl1/cpucl2 free")
         for c in cl:
             busy = 0.0
             for cpu in c.cpus:
@@ -332,6 +342,11 @@ def main(argv):
                     if dt > 0:
                         busy = max(busy, db / dt)
             mhz = c.levels[-1] if boosted else c.pick(busy)
+            if hot and c.name in BIG:
+                mhz = c.levels[0]
+                if c.cur != mhz and not once:	# at once, no DOWN_HOLD
+                    request(c, mhz)
+                    continue
             if once:
                 print("%s busy %3.0f%% -> %d MHz (levels %s)" % (
                     c.name, 100 * busy, mhz, " ".join(map(str, c.levels))))

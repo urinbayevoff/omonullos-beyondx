@@ -22,9 +22,16 @@
  * it sleep after: without it, data sent after INIT_END lies unread */
 #define CONFIG_LINK_POWER_MANAGEMENT 1
 #define CONFIG_CP_ETDAC_OTP_WA 1	/* stock: y */
-/* CONFIG_CP_ZEROCOPY, CONFIG_CP_DIT and CONFIG_CP_PKTPROC_V2 (stock: y) are
- * left off for now: packet data is not needed for calls and SMS, and
- * zerocopy builds skbs with __build_skb, which mainline does not export */
+/* mobile data (2026-11-18): the LTE CP writes downlink packets into the
+ * zero-copy buffers (multipdp, ATTR_ZEROCOPY), so CONFIG_CP_ZEROCOPY is on,
+ * as stock; but always through the copying path (no __build_skb, which
+ * mainline does not export, and the buffers are no-map memory with no
+ * struct page), as on the S9 (modem/README.md "Receive copies").
+ * CONFIG_CP_DIT and CONFIG_CP_PKTPROC_V2 (stock: y) stay off: DIT is an
+ * offload the RX path skips when inactive, pktproc v2 is the S5100's. */
+#define CONFIG_CP_ZEROCOPY 1
+#include <linux/types.h>
+dma_addr_t shm_zmb_dma_addr(void *v);
 #define CONFIG_MODEM_IF_QOS 1
 /* the stock kernel had PCIe on (for the S5100), which shapes the shared
  * memory map and the link/modem structures the LTE side uses too: kept so

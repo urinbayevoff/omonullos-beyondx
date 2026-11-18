@@ -5,6 +5,7 @@
 #                              every disk read-only, list the partitions
 #   zufs root                  as above, then only the partition labelled
 #                              ZR_ARCH writable, and only if it is userdata
+#                              or omonull
 #                              (initramfs runs this before it looks for root)
 #   zufs list                  the partitions again (name, device, size)
 #   zufs check <name> <file>   sha256 of the first <file size> bytes of the
@@ -12,6 +13,8 @@
 #
 # Added for OmonullOS, October 2026. Untested. scripts/build-boot.sh --ufs
 # puts it in initramfs as /bin/zufs together with the module.
+# Modified for OmonullOS, November 2026: the root may also sit on a
+# partition named omonull (dual boot, docs/s10-5g/DUAL-BOOT-STEP3.md).
 #
 # The host sits in BLK_FSYS1: no power domain of its own, but its clocks
 # come through two CMU_TOP gates and four CMU_FSYS1 gates, and a read from a
@@ -62,11 +65,16 @@ setro() {	# every sd disk and partition there is, read-only
 	done
 }
 
-rootrw() {	# the ZR_ARCH partition writable, if it is userdata; the rest stays ro
+rootrw() {	# the ZR_ARCH partition writable, if it is userdata or omonull; the rest stays ro
 	d=$(findfs LABEL=ZR_ARCH 2>/dev/null)
 	[ -n "$d" ] || { echo "zufs: no ZR_ARCH"; return 1; }
 	n=$(sed -n 's/^PARTNAME=//p' "/sys/class/block/${d#/dev/}/uevent")
-	[ "$n" = userdata ] || { echo "zufs: ZR_ARCH is $d ($n), not userdata: left read-only"; return 1; }
+	# omonull: its name once the disk is shared with Android, whose data
+	# partition has to be called userdata (docs/s10-5g/DUAL-BOOT-STEP3.md)
+	case "$n" in
+	userdata|omonull) ;;
+	*) echo "zufs: ZR_ARCH is $d ($n), not userdata or omonull: left read-only"; return 1 ;;
+	esac
 	# the disk's flag only lifts what the partitions' own flags allow
 	blockdev --setrw "/dev/$(basename "$(readlink -f "/sys/class/block/${d#/dev/}/..")")"
 	blockdev --setrw "$d"

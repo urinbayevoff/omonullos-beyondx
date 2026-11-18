@@ -4,9 +4,9 @@
 # /run/ztoscorenetworking/status the way ztoscorenetworkingd does on the S9
 # (ztMETRO reads it when "modem" comes on its control pipe). This Samsung RIL
 # does not send unsol 1009, so the signal is polled.
-# No packet context is ever made here, so data=0; data_on is the user's mobile
-# data tile, taken as "data on|off" on /run/ztoscorenetworking.ctl and kept in
-# /var/lib/zmodem/data_on.
+# data_on is the user's mobile data tile, taken as "data on|off" on
+# /run/ztoscorenetworking.ctl and kept in /var/lib/zmodem/data_on; while it is
+# on the packet context is kept up here (data_tick), data=1 once it is.
 # Calls and messages for the Phone and Messaging apps (comm.h), as
 # ztoscorenetworkingd does on the S9: "call NUMBER", "answer", "hangup" and
 # "sms NUMBER TEXT" (or "smse", escaped) on the control pipe go to the RIL (DIAL 10, ANSWER 40,
@@ -29,7 +29,8 @@
 # (zrn-s6sy761's ear_detect, input "s6sy761 ear detect", SW_FRONT_PROXIMITY)
 # darkens the screen through ztMETRO's "prox near|far", as stock does; the
 # IC goes to its low power mode while dark (lp_mode), or it stops sensing.
-import glob, os, re, signal, socket, struct, subprocess, sys, time
+# November 2026: mobile data (data_tick, docs/s10-5g/MOBILE-DATA.md).
+import glob, os, re, signal, socket, struct, subprocess, sys, time, traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zsend import tpdu
 
@@ -64,7 +65,7 @@ def tech_of(rat):	# RIL_RadioTechnology -> the data icon
 		3: '3G', 2: 'E', 1: 'G', 16: 'G'}.get(rat, '')
 
 REG = {1: 'home', 5: 'roaming', 2: 'searching', 12: 'searching', 3: 'denied', 13: 'denied'}
-now = {'operator': '', 'bars': -1, 'voice': 0, 'data': 0, 'rat': 0}
+now = {'operator': '', 'plmn': '', 'bars': -1, 'voice': 0, 'data': 0, 'rat': 0}
 call = {'state': '', 'number': '', 'idx': 0, 'since': 0, 'answered': 0, 'incoming': False}
 sms_out = []	# numbers of the SEND_SMS requests not answered yet
 
@@ -487,10 +488,434 @@ def call_set(state, number=''):
 		call['number'] = number
 	publish()
 
+# Mobile data. While the tile is on and the phone is registered at home, one
+# packet context is kept up through the RIL (SETUP_DATA_CALL 27, strings as
+# libsec-ril.so reads them, see zdata-try.sh) with a default route behind
+# Wi-Fi's, so it takes over by itself when Wi-Fi goes. Never set up in roaming
+# or during a call. The DNS servers are given to resolved only while no other
+# default route is in front: the operator's own would time out over Wi-Fi.
+# None of this may touch calls and messages: every entry goes through data_safe.
+APN_FILE = '/etc/ztoscorenetworking/apn'	# Settings > cellular + SIM > access point
+APN_AUTO = "# zcell: the operator's default, for "	# first line + PLMN: not the user's
+APNS = {	# stock apns-conf.xml's internet entries: apn, user, password, auth
+	'43404': ('internet.beeline.uz', 'beeline', 'beeline', 1),
+	'43405': ('internet', '', '', 0),
+	'43406': ('default', '', '', 0),
+	'43407': ('net.ums.uz', '', '', 0),
+	'43408': ('internet.uzmobile.uz', '', '', 0),
+}
+DATA_STATE = '/run/zcell-data'	# "CID", the context a restarted zcell takes back
+DATA_METRIC = 700		# Wi-Fi has 600
+DATA_WAIT, ADOPT_WAIT = 60, 15	# s for the RIL's answers
+DATA_BACKOFF = (5, 15, 30, 60, 120, 300)
+STALL_EVERY, STALL_LIMIT = 30, 3	# that many periods of sending with nothing back
+DATA_ENTRY = re.compile(r'\{cid (\d+) active (\d+) status (-?\d+) retry (-?\d+) (\S*) (\S+) '
+	r'addr (.*?) dns (.*?) gw (.*?) mtu (-?\d+)\}')
+data = {'state': 'idle', 'cid': 0, 'ifn': '', 'addr': '', 'dns': [], 'dns_on': False,
+	'since': 0, 'retry': 0, 'fails': 0, 'tick': 0, 'stall': 0, 'stall_due': 0, 'rx': 0, 'tx': 0}
+ATTACH_EVERY, ATTACH_RETRY, ATTACH_TRIES = 5, 30, 3	# s, s, answers with an error
+attach = {'plmn': '', 'sent': None, 'due': 0, 'tries': 0, 'operator': ''}
+# The network type, Settings > cellular + SIM: "net lte|3g" on CTL, kept in
+# NET_FILE. There is no VoLTE, so on LTE a call falls back to 3G (CSFB), which
+# is known to work only on the networks in LTE_BY_DEFAULT: the others start on
+# 3G until the user picks 4G.
+NET_FILE = '/var/lib/zmodem/net_mode'
+NET_TYPES = {'lte': 9, '3g': 0}	# RIL preferred network: LTE/WCDMA/GSM, WCDMA first
+LTE_BY_DEFAULT = ('43408',)
+NET_EVERY = 30	# s, until the modem has answered
+nettype = {'chosen': '', 'have': None, 'asked': None, 'due': 0}
+# The modem is told when the screen is off (RIL_REQUEST_SCREEN_STATE), as
+# Android does: with mobile data as the only network and the modem not told, its
+# network state messages woke the phone from every sleep within seconds.
+SCREEN_REQ = 61
+screen = {'told': None, 'due': 0}
+ANDROID_ROOT = '/run/android'
+ANDROID_LIBS = '/apex/com.android.i18n/lib64:/apex/com.android.runtime/lib64'
+
+def data_safe(f, *args):
+	try:
+		f(*args)
+	except Exception:
+		print('data: ' + traceback.format_exc(), flush=True)
+		data['tick'] = time.time() + 30
+
+def net(*cmd):
+	try:
+		return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+			timeout=5).returncode == 0
+	except (OSError, subprocess.SubprocessError):
+		return False
+
+def data_entries(text):
+	return [{'cid': int(e[0]), 'active': int(e[1]), 'status': int(e[2]), 'retry': int(e[3]),
+		'ifn': e[5], 'addr': e[6].split(), 'dns': e[7].split(), 'mtu': int(e[9])}
+		for e in DATA_ENTRY.findall(text)]
+
+def apn_of_operator(plmn=None):
+	return APNS.get(plmn or now['plmn'], ('internet', '', '', 0))
+
+def apn_file_sync():
+	"""Settings shows and edits APN_FILE: keep the operator's APN there, for
+	the SIM in the phone, until the user saves one of their own (Settings
+	writes its own first line). The user's, so that Settings may overwrite it."""
+	if not now['plmn']:
+		return
+	mark = APN_AUTO + now['plmn'] + '\n'
+	try:
+		first = open(APN_FILE).readline()
+		if first == mark or not first.startswith(APN_AUTO):
+			return
+	except OSError:
+		pass
+	apn, user, password, auth = apn_of_operator()
+	os.makedirs(os.path.dirname(APN_FILE), exist_ok=True)
+	with open(APN_FILE + '.new', 'w') as f:
+		f.write('%sapn = %s\nuser = %s\npassword = %s\nauth = %s\n' % (mark, apn, user, password,
+			('none', 'pap', 'chap')[auth]))
+	homes = sorted(glob.glob('/run/user/[1-9]*'))
+	os.chown(APN_FILE + '.new', os.stat(homes[0]).st_uid if homes else 1000, -1)
+	os.chmod(APN_FILE + '.new', 0o644)
+	os.rename(APN_FILE + '.new', APN_FILE)
+
+def apn_conf(plmn=None):
+	"""apn, user, password, auth: the one saved in Settings, else the operator's"""
+	conf, auths = {}, {'none': 0, 'pap': 1, 'chap': 2}
+	try:
+		with open(APN_FILE) as f:
+			if f.readline().startswith(APN_AUTO):
+				return apn_of_operator(plmn)
+			f.seek(0)
+			for line in f:
+				key, eq, value = line.partition('=')
+				if eq and not key.lstrip().startswith('#'):
+					conf[key.strip()] = value.strip()
+	except OSError:
+		pass
+	got = (conf.get('apn', ''), conf.get('user', ''), conf.get('password', ''),
+		auths.get(conf.get('auth', 'none'), 0))
+	# rild-lite splits its commands at blanks; "-" would be NULL, "" empty
+	if got[0] and all(re.fullmatch(r'[^\s"]*', v) and v != '-' for v in got[:3]):
+		return got
+	return apn_of_operator(plmn)
+
+def reg_plmn(rest):
+	"""MCC and MNC in the cell identity of a registration answer: there
+	seconds after the modem starts, long before the operator's name"""
+	m = re.search(r'([0-9a-f]+)$', rest)
+	found = m and re.search(rb'(\d{3})\0(\d{2,3})\0', bytes.fromhex(m.group(1)[:len(m.group(1)) & ~1]))
+	return (found.group(1) + found.group(2)).decode() if found else ''
+
+def sim_operator(plmn):
+	"""libsec-ril answers SET_INITIAL_ATTACH_APN with success but drops it
+	("invalid sim operator") until this property is set; on Android the
+	telephony framework sets it"""
+	if attach['operator'] == plmn:
+		return True
+	try:
+		done = subprocess.run(['chroot', ANDROID_ROOT, '/system/bin/setprop',
+			'gsm.sim.operator.numeric', plmn], env=dict(os.environ, LD_LIBRARY_PATH=ANDROID_LIBS),
+			stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+	except (OSError, subprocess.SubprocessError):
+		done = False
+	if done:
+		attach['operator'] = plmn
+	else:
+		print('attach: could not set the SIM operator', flush=True)
+	return done
+
+def net_load():
+	try:
+		with open(NET_FILE) as f:
+			v = f.read().strip()
+	except OSError:
+		v = ''
+	nettype['chosen'] = v if v in NET_TYPES else ''
+
+def net_mode():
+	"""'lte' or '3g'; '' while the network is not known and nothing was chosen"""
+	if nettype['chosen']:
+		return nettype['chosen']
+	plmn = now['plmn'] or attach['plmn']
+	return '' if not plmn else 'lte' if plmn in LTE_BY_DEFAULT else '3g'
+
+def net_choose(mode):
+	try:
+		with open(NET_FILE + '.new', 'w') as f:
+			f.write(mode + '\n')
+		os.replace(NET_FILE + '.new', NET_FILE)
+	except OSError as e:
+		print('net: not saved: %s' % e, flush=True)
+	nettype.update(chosen=mode, due=0)
+	print('net: %s chosen' % mode, flush=True)
+
+def net_tick(t):
+	"""read the modem's preferred network once, change it only if it differs"""
+	mode = net_mode()
+	if not mode or not (now['plmn'] or attach['plmn']) or call['state'] or t < nettype['due']:
+		return
+	if nettype['have'] is None:
+		nettype['due'] = t + NET_EVERY
+		s.sendall(b'raw0 74\n')
+	elif nettype['have'] != NET_TYPES[mode]:
+		nettype.update(asked=NET_TYPES[mode], due=t + NET_EVERY)
+		s.sendall(b'rawi 73 %d\n' % nettype['asked'])
+
+def net_answer(req, ok, rest):
+	if not ok:
+		print('net: request %d refused' % req, flush=True)
+	elif req == 74:
+		nettype.update(have=int(rest.split()[0]), due=0)
+	elif nettype['asked'] is not None:
+		nettype.update(have=nettype['asked'], asked=None, due=0)
+		attach.update(sent=None, due=0, tries=0)	# LTE again: it needs its access point again
+		print('net: modem set to %d' % nettype['have'], flush=True)
+
+def attach_tick(t):
+	"""LTE asks for its access point while attaching; without one the modem
+	gives up after ~20 s and stays on 3G"""
+	plmn = now['plmn'] or attach['plmn']
+	if not plmn or call['state'] or t < attach['due'] or nettype['have'] != NET_TYPES['lte'] \
+			or net_mode() != 'lte':
+		return
+	attach['due'] = t + ATTACH_EVERY
+	conf = apn_conf(plmn)
+	if conf == attach['sent']:
+		return
+	if not sim_operator(plmn):
+		attach['due'] = t + ATTACH_RETRY
+		return
+	q = lambda v: v or '""'
+	s.sendall(('attach %s IP %s %s %d\n' % (conf[0], q(conf[1]), q(conf[2]), conf[3])).encode())
+	attach['sent'] = conf
+	print('attach: apn %s' % conf[0], flush=True)
+
+def attach_answer(ok, e):
+	if ok:
+		attach['tries'] = 0
+		return
+	attach['tries'] += 1
+	print('attach: refused, e=%s' % e, flush=True)
+	if attach['tries'] < ATTACH_TRIES:
+		attach.update(sent=None, due=time.time() + ATTACH_RETRY)
+
+def data_setup():
+	apn, user, password, auth = apn_conf()
+	q = lambda v: v or '""'
+	# radioTech profile apn user password authType protocol roamingProtocol
+	# supportedTypes bearerBitmask modemCognitive mtu mvnoType mvnoMatch roamingAllowed
+	s.sendall(('raws 27 %d 0 %s %s %s %d IP IP 1 0 0 0 "" "" 1\n' % (now['rat'], apn,
+		q(user), q(password), auth)).encode())
+	data.update(state='asking', since=time.time())
+	print('data: asking, apn %s, radio tech %d' % (apn, now['rat']), flush=True)
+
+def data_dns(on):
+	if on == data['dns_on']:
+		return
+	data['dns_on'] = on
+	if on and data['dns']:
+		net('resolvectl', 'dns', data['ifn'], *data['dns'])
+		net('resolvectl', 'default-route', data['ifn'], 'yes')
+	else:
+		net('resolvectl', 'revert', data['ifn'])
+
+def route_in_front():
+	"""a default route that is used before ours (Wi-Fi's)?"""
+	with open('/proc/net/route') as f:
+		for line in f.readlines()[1:]:
+			w = line.split()
+			if w[0] != data['ifn'] and w[1] == '00000000' and w[7] == '00000000' and \
+					int(w[3], 16) & 1 and int(w[6]) < DATA_METRIC:
+				return True
+	return False
+
+def data_net_off():
+	ifn, addr = data['ifn'], data['addr']
+	if not ifn:
+		return
+	data_dns(False)
+	net('ip', 'route', 'del', 'default', 'dev', ifn, 'metric', str(DATA_METRIC))
+	if addr:
+		net('ip', 'addr', 'del', addr, 'dev', ifn)
+	net('ip', 'link', 'set', ifn, 'down')
+	data.update(ifn='', addr='', dns=[])
+
+def data_forget(state='idle'):
+	data_net_off()
+	data.update(state=state, cid=0, stall=0)
+	try:
+		os.unlink(DATA_STATE)
+	except OSError:
+		pass
+	publish()
+
+def data_failed(why, retry=0):
+	wait = DATA_BACKOFF[min(data['fails'], len(DATA_BACKOFF) - 1)]
+	data['fails'] += 1
+	data['retry'] = time.time() + max(wait, retry)
+	print('data: %s, again in %d s' % (why, data['retry'] - time.time()), flush=True)
+	data_forget()
+
+def data_up(e):
+	ifn, addr = e['ifn'], e['addr'][0] if e['addr'] else ''
+	if not re.fullmatch(r'rmnet[0-7]', ifn) or not re.fullmatch(r'[0-9.]+(/\d+)?', addr):
+		s.sendall(('raws 41 %d 0\n' % e['cid']).encode())
+		data_failed('odd answer: %s %s' % (ifn, addr))
+		return
+	if '/' not in addr:
+		addr += '/32'
+	if data['ifn'] and (data['ifn'], data['addr']) != (ifn, addr):
+		data_net_off()
+	net('ip', 'link', 'set', ifn, 'up')
+	if 576 <= e['mtu'] <= 1500:
+		net('ip', 'link', 'set', ifn, 'mtu', str(e['mtu']))
+	ok = net('ip', 'addr', 'replace', addr, 'dev', ifn)
+	ok = net('ip', 'route', 'replace', 'default', 'dev', ifn, 'metric', str(DATA_METRIC)) and ok
+	data.update(ifn=ifn, addr=addr, cid=e['cid'], dns=[d for d in e['dns'] if ':' not in d])
+	if not ok:
+		s.sendall(('raws 41 %d 0\n' % e['cid']).encode())
+		data_failed('could not set up ' + ifn)
+		return
+	data.update(state='up', fails=0, stall=0, stall_due=time.time() + STALL_EVERY, rx=-1, tx=-1)
+	with open(DATA_STATE, 'w') as f:
+		f.write('%d\n' % e['cid'])
+	print('data: up on %s (cid %d)' % (ifn, e['cid']), flush=True)
+	data_dns(not route_in_front())
+	publish()
+
+def data_down(retry=2):
+	s.sendall(('raws 41 %d 0\n' % data['cid']).encode())
+	print('data: down', flush=True)
+	data['retry'] = time.time() + retry
+	data_forget()
+
+def data_start():
+	"""after a restart of zcell: the context it had may still be up"""
+	try:
+		data['cid'] = int(open(DATA_STATE).read())
+	except (OSError, ValueError):
+		return
+	s.sendall(b'raw0 57\n')
+	data.update(state='adopting', since=time.time())
+
+def data_answer(req, ok, rest):
+	entries = data_entries(rest) if ok else []
+	if req == 27 and data['state'] == 'asking':
+		e = entries[0] if entries else None
+		if not ok or not e:
+			data_failed('refused: ' + rest[:80])
+		elif e['status'] or not e['addr']:
+			data_failed('status %d' % e['status'], max(e['retry'], 0) // 1000)
+		else:
+			data_up(e)
+	elif req == 57 and data['state'] == 'adopting':
+		e = next((e for e in entries if e['cid'] == data['cid'] and e['active'] and e['addr']), None)
+		if e:
+			data_up(e)
+		else:
+			data_forget()
+	elif req == 57 and data['state'] == 'up' and entries:
+		data_list(entries)
+
+def data_list(entries):
+	e = next((e for e in entries if e['cid'] == data['cid']), None)
+	if not e or not e['active']:
+		data_failed('the network dropped it')
+	elif e['addr'] and e['addr'][0].split('/')[0] != data['addr'].split('/')[0]:
+		data_up(e)
+
+def data_changed(line):	# unsol 1010, DATA_CALL_LIST_CHANGED
+	if data['state'] != 'up':
+		return
+	if line.startswith('! 1010 n=0'):
+		data_failed('the network dropped it')
+		return
+	entries = data_entries(line)
+	if entries:
+		data_list(entries)
+
+def data_stalled(t):
+	"""packets go out and for a long time none come back: connect again"""
+	data['stall_due'] = t + STALL_EVERY
+	base = '/sys/class/net/%s/statistics/' % data['ifn']
+	try:
+		rx, tx = int(open(base + 'rx_packets').read()), int(open(base + 'tx_packets').read())
+	except (OSError, ValueError):
+		data_failed('the interface went away')
+		return
+	stuck = data['tx'] >= 0 and tx - data['tx'] >= 5 and rx == data['rx']
+	data.update(rx=rx, tx=tx, stall=data['stall'] + 1 if stuck else 0)
+	if data['stall'] >= STALL_LIMIT:
+		print('data: nothing comes back', flush=True)
+		data['fails'] += 1
+		data_down(5)
+
+def screen_is_on():
+	"""None when there is no panel to ask"""
+	for p in glob.glob('/sys/class/drm/card*-DSI-1/dpms'):
+		try:
+			with open(p) as f:
+				return f.read().strip() != 'Off'
+		except OSError:
+			pass
+	return None
+
+def screen_tick(t):
+	on = screen_is_on()
+	if on is None or t < screen['due']:
+		return
+	on = on or bool(call['state'])	# the ear darkens the screen in a call: nothing changes for the modem
+	if on != screen['told']:
+		screen.update(told=on, due=0)
+		s.sendall(b'rawi %d %d\n' % (SCREEN_REQ, on))
+
+def screen_answer(ok):
+	if not ok:
+		print('screen: the modem refused the screen state', flush=True)
+		screen.update(told=None, due=time.time() + NET_EVERY)
+
+def data_tick():
+	t = time.time()
+	if t < data['tick']:
+		return
+	data['tick'] = t + 1
+	screen_tick(t)
+	net_tick(t)
+	attach_tick(t)
+	st, wanted = data['state'], os.path.exists(WISH)
+	if st == 'idle':
+		if wanted and now['data'] == 1 and now['rat'] and not call['state'] and t >= data['retry'] \
+				and (now['plmn'] or os.path.exists(APN_FILE)):
+			data_setup()
+	elif st == 'asking':
+		if t - data['since'] > DATA_WAIT:
+			data_failed('no answer')
+	elif st == 'adopting':
+		if t - data['since'] > ADOPT_WAIT:
+			data_forget()
+	elif not wanted or now['data'] == 5:	# up: off, or roaming now
+		data_down()
+	else:
+		data_dns(not route_in_front())
+		if t >= data['stall_due']:
+			data_stalled(t)
+
+def data_apn():	# a new access point was saved
+	data.update(fails=0, retry=0, tick=0)
+	attach.update(due=0, tries=0)
+	if data['state'] == 'up':
+		data_down(1)
+
 def command(cmd):
 	global poll, call_vol
 	if cmd in ('data on', 'data off'):
 		wish(cmd == 'data on')
+		data.update(fails=0, retry=0, tick=0)
+	elif cmd == 'apn':
+		data_safe(data_apn)
+	elif cmd in ('net lte', 'net 3g'):
+		net_choose(cmd[4:])
+		data['tick'] = 0
+		publish()
 	elif cmd.startswith('call '):
 		number = cmd[5:].strip()
 		if re.fullmatch(r'[0-9+*#]{1,30}', number) and not call['state']:
@@ -634,8 +1059,9 @@ def publish():
 		bars = 3
 	ps = now['data'] in (1, 5)
 	text = ('sim=ready\noperator=%s\nbars=%d\nregistered=%s\ntech=%s\nairplane=0\n'
-		'data=0\ndata_on=%d\ncall=%s\ncall_number=%s\n' % (now['operator'], bars, reg,
-		tech_of(now['rat']) if ps else '', os.path.exists(WISH), call['state'] or 'idle', call['number']))
+		'data=%d\ndata_on=%d\ncall=%s\ncall_number=%s\nnet_mode=%s\n' % (now['operator'], bars, reg,
+		tech_of(now['rat']) if ps else '', data['state'] == 'up', os.path.exists(WISH),
+		call['state'] or 'idle', call['number'], net_mode()))
 	try:
 		with open(STATUS) as f:
 			if f.read() == text:
@@ -679,9 +1105,11 @@ try:
 	os.unlink(CTL)
 except OSError:
 	pass
+net_load()
 os.mkfifo(CTL); os.chmod(CTL, 0o666)	# anyone may write, as on the S9
 ctl, cbuf = os.open(CTL, os.O_RDWR | os.O_NONBLOCK), b''
 buf, due, poll = b'', 0, 0
+data_safe(data_start)
 try:
 	while True:
 		try:
@@ -692,6 +1120,7 @@ try:
 			cmd, cbuf = cbuf.split(b'\n', 1)
 			command(cmd.decode(errors='replace').strip())
 		ear_tick()
+		data_safe(data_tick)
 		if not call['state'] and not os.path.exists(VSS_STARTED) and uptime() > VSS_AT:
 			start_vss()
 		if time.time() >= due:
@@ -724,10 +1153,21 @@ try:
 			if line.startswith('! 1001 '):	# CALL_STATE_CHANGED
 				poll = time.time()
 				continue
+			if line.startswith('! 1010 '):
+				data_safe(data_changed, line)
+				continue
 			m = re.match(r'< (\d+) #\d+ e=(\d+) n=\d+ ?(.*)', line)
 			if not m:
 				continue
 			req, ok, rest = int(m.group(1)), m.group(2) == '0', m.group(3)
+			if req in (27, 57):
+				data_safe(data_answer, req, ok, rest)
+			if req == 111:
+				data_safe(attach_answer, ok, m.group(2))
+			if req in (73, 74):
+				data_safe(net_answer, req, ok, rest)
+			if req == SCREEN_REQ:
+				data_safe(screen_answer, ok)
 			if req == 59 and audio_log:
 				audio_log.append('%.3f < %s' % (time.time(), line))
 			if req == 18 and os.path.isdir('/var/lib/zfield/repo/logs'):
@@ -753,9 +1193,14 @@ try:
 			elif req == 22:
 				names = re.findall(r'\[([^\]]*)\]', rest)
 				now['operator'] = next((n for n in names if n and n != '-'), '')
+				plmn = next((n for n in names if re.fullmatch(r'\d{5,6}', n)), '')
+				if plmn != now['plmn']:
+					now['plmn'] = plmn
+					data_safe(apn_file_sync)
 			elif req in (20, 21):
 				r = re.match(r'reg (\d+) rat (\d+)', rest)
 				if r:
+					attach['plmn'] = reg_plmn(rest) or attach['plmn']
 					now['voice' if req == 20 else 'data'] = int(r.group(1))
 					if req == 21:
 						now['rat'] = int(r.group(2))

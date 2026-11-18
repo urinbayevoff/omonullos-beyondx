@@ -7,10 +7,11 @@
 #
 #   >= SOFT (75 C): every task's affinity to the A55s (cpu0-3), so the A75s
 #                   and M4s go idle; undone below CLEAR (60 C)
-#   >= HARD (85 C): cpu4-7 offline. One way: Samsung's EL3 does not bring a
-#                   core back through PSCI CPU_ON after CPU_OFF (their kernel
-#                   powers it up through the PMU first), so they stay off
-#                   until the next boot
+#   >= HARD (85 C): tasks on cpu0-3 as SOFT, and $HOT for zgov, which then
+#                   keeps cpucl1/cpucl2 at their floor (520 MHz); undone
+#                   below CLEAR. It used to take cpu4-7 offline, but that
+#                   CPU_OFF hung the phone (15.11, 17.11: PSCI -110, APM
+#                   silent, reset)
 #   >= CRIT (95 C): reset now through uniLoader's watchdog (WTCNT = 1), the
 #                   way back to TWRP already proven; reboot -f if that
 #                   watchdog is not running
@@ -23,10 +24,13 @@
 # Added for OmonullOS, October 2026. Tested on the phone (bx15): each level
 # triggered on purpose with low test levels, see docs/s10-5g/log.md.
 # Modified for OmonullOS, November 2026: every 2 s while well below CLEAR
-# (the guards took ~35 % of a core at idle).
+# (the guards took ~35 % of a core at idle). 17.11: HARD no longer takes
+# cpu4-7 offline (it hung the phone), it asks zgov for the floor instead.
 
 B=0x10090000
 WDT=0x10050000
+HOT=/run/zthermal.hot	# zgov keeps the big clusters at their floor while it exists
+rm -f $HOT
 SOFT=${1:-75} HARD=${2:-85} CRIT=${3:-95} CLEAR=${4:-60}
 
 say() {
@@ -83,23 +87,23 @@ while :; do
 		fi
 		reboot -f
 	elif [ "$T" -ge "$HARD" ] && [ "$state" != hard ]; then
-		for c in 4 5 6 7; do
-			echo 0 > /sys/devices/system/cpu/cpu$c/online 2>/dev/null
-		done
+		: > $HOT
+		affinity 0f
 		state=hard
-		say "$T C >= $HARD: cpu4-7 offline until reboot ($(cat /sys/devices/system/cpu/online) online)"
+		say "$T C >= $HARD: tasks on cpu0-3, cpucl1/cpucl2 at their floor"
 	elif [ "$T" -ge "$SOFT" ] && [ "$state" = normal ]; then
 		affinity 0f
 		state=soft
 		say "$T C >= $SOFT: tasks kept on cpu0-3"
-	elif [ "$T" -lt "$CLEAR" ] && [ "$state" = soft ]; then
+	elif [ "$T" -lt "$CLEAR" ] && [ "$state" != normal ]; then
+		rm -f $HOT
 		affinity ff
 		state=normal
 		say "$T C < $CLEAR: all CPUs again"
 	fi
 	# a soft state keeps new tasks off the big cores too: they inherit it
 	# from their parents, but recheck so nothing escapes
-	[ "$state" = soft ] && [ $((n = ${n:-0} + 1)) -ge 10 ] && { affinity 0f; n=0; }
+	[ "$state" != normal ] && [ $((n = ${n:-0} + 1)) -ge 10 ] && { affinity 0f; n=0; }
 	# well below every level, every other second: four loaded big cores
 	# climb ~3 C/s (41 -> 57 C in 6 s), so from under CLEAR - 10 the next
 	# read is still far from SOFT, and from there on it is every second

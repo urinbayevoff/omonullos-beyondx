@@ -7,7 +7,7 @@
  *
  *   raw0 REQ               a request without data
  *   rawi REQ INT...        with an int array
- *   raws REQ STR...        with a string array ("-" = NULL)
+ *   raws REQ STR...        with a string array ("-" = NULL, \"\" = empty)
  *   rawx REQ HEX           with bytes (OEM_HOOK_RAW 59: service mode)
  *   rawz REQ STR           with one string (SEND_USSD 29: "*102#")
  *   dial NUMBER            RIL_REQUEST_DIAL
@@ -17,13 +17,14 @@
  *   ! UNSOL n=LEN [decoded]
  *
  * Built with the NDK for bionic (scripts/bx-ril-build.sh). Added for
- * OmonullOS, October 2026.
+ * OmonullOS, October 2026; data call answers decoded since November 2026.
  */
 #include <dlfcn.h>
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,33 @@ struct RIL_Env {
 	void (*OnRequestAck)(RIL_Token t);
 };
 typedef struct { char *address; int clir; void *uusInfo; } RIL_Dial;
+/* SETUP_DATA_CALL (27), DATA_CALL_LIST (57), unsol DATA_CALL_LIST_CHANGED
+ * (1010): one or an array of Samsung's RIL_Data_Call_Response_v12. It starts
+ * as AOSP's v11 (below) but one element is 0xcaf08 bytes
+ * (DataCallRespBuilder::BuildDataCallResponse in libsec-ril.so). */
+#define DATA_CALL_SIZE	0xcaf08
+typedef struct {
+	int status, suggestedRetryTime, cid, active;
+	char *type, *ifname, *addresses, *dnses, *gateways, *pcscf;
+	int mtu;
+} RIL_Data_Call_Response_v11;
+/* SET_INITIAL_ATTACH_APN (111): AOSP's RIL_InitialAttachApn_v15, then fields
+ * of Samsung's that SecRilAdaptor::CopyDataReqData reads up to offset 116 */
+typedef struct {
+	char *apn, *protocol, *roamingProtocol;
+	int authtype;
+	char *username, *password;
+	int supportedTypesBitmask, bearerBitmask, modemCognitive, mtu;
+	char *mvnoType, *mvnoMatchData;
+	char samsung[48];
+} RIL_InitialAttachApn;
+_Static_assert(offsetof(RIL_InitialAttachApn, authtype) == 24 &&
+	       offsetof(RIL_InitialAttachApn, username) == 32 &&
+	       offsetof(RIL_InitialAttachApn, supportedTypesBitmask) == 48 &&
+	       offsetof(RIL_InitialAttachApn, mtu) == 60 &&
+	       offsetof(RIL_InitialAttachApn, mvnoType) == 64 &&
+	       offsetof(RIL_InitialAttachApn, samsung) == 80 &&
+	       sizeof(RIL_InitialAttachApn) == 128, "libsec-ril's layout");
 typedef struct {
 	int state, index, toa; char isMpty, isMT, als, isVoice, isVoicePrivacy;
 	char *number; int numberPresentation; char *name; int namePresentation;
@@ -150,6 +178,23 @@ static void decode(char *out, size_t size, int req, const void *p, size_t len, i
 			o += snprintf(out + o, size - o, " {idx %d state %d %s %s}", c[i]->index,
 				      c[i]->state, c[i]->isMT ? "in" : "out",
 				      c[i]->number ? c[i]->number : "?");
+	} else if (((!unsol && (req == 27 || req == 57)) || (unsol && req == 1010)) &&
+		   len % DATA_CALL_SIZE == 0) {
+		/* "{cid C active A status S retry R TYPE IFNAME addr ADDR dns DNS gw GW mtu M}";
+		 * the unused slots of the list have no interface */
+#define S_(x) ((x) ? (x) : "-")
+		for (size_t i = 0; i < len / DATA_CALL_SIZE && o + 200 < size; i++) {
+			const RIL_Data_Call_Response_v11 *d =
+				(const void *)((const char *)p + i * DATA_CALL_SIZE);
+			if (!d->ifname)
+				continue;
+			o += snprintf(out + o, size - o,
+				      " {cid %d active %d status %d retry %d %s %s addr %s dns %s gw %s mtu %d}",
+				      d->cid, d->active, d->status, d->suggestedRetryTime,
+				      S_(d->type), d->ifname, S_(d->addresses),
+				      S_(d->dnses), S_(d->gateways), d->mtu);
+		}
+#undef S_
 	} else if (len % 4 == 0 && len <= 128) {
 		const int *v = p;
 		for (size_t i = 0; i < len / 4 && o + 16 < size; i++)
@@ -252,8 +297,20 @@ static void command(char *line)
 		request(10, &d, sizeof(d));
 		return;
 	}
+	if (!strcmp(argv[0], "attach") && argc == 6) {	/* attach APN PROTOCOL USER PASSWORD AUTH */
+#define EMPTY_(x) (!strcmp((x), "\"\"") ? (char *)"" : (x))
+		RIL_InitialAttachApn a = {
+			.apn = EMPTY_(argv[1]), .protocol = argv[2], .roamingProtocol = argv[2],
+			.authtype = atoi(argv[5]), .username = EMPTY_(argv[3]),
+			.password = EMPTY_(argv[4]), .supportedTypesBitmask = 1,	/* default */
+			.mvnoType = (char *)"", .mvnoMatchData = (char *)"",
+		};
+#undef EMPTY_
+		request(111, &a, sizeof(a));
+		return;
+	}
 	if (argc < 2) {
-		say("? usage: raw0|rawi|raws|rawx|rawz REQ ..., dial NUMBER");
+		say("? usage: raw0|rawi|raws|rawx|rawz REQ ..., dial NUMBER, attach APN PROTOCOL USER PASSWORD AUTH");
 		return;
 	}
 	int req = atoi(argv[1]), n = argc - 2;
@@ -267,7 +324,8 @@ static void command(char *line)
 	} else if (!strcmp(argv[0], "raws")) {
 		char *v[30];
 		for (int i = 0; i < n; i++)
-			v[i] = strcmp(argv[i + 2], "-") ? argv[i + 2] : NULL;
+			v[i] = !strcmp(argv[i + 2], "-") ? NULL :
+			       !strcmp(argv[i + 2], "\"\"") ? (char *)"" : argv[i + 2];
 		request(req, v, n * sizeof(char *));
 	} else if (!strcmp(argv[0], "rawz") && n == 1) {
 		request(req, argv[2], strlen(argv[2]) + 1);

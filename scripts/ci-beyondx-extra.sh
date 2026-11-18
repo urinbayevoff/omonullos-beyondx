@@ -66,6 +66,7 @@ for m in soundcore snd snd-timer snd-pcm i2c-algo-bit; do put "$B/abox-bx/out/$m
 find "$OUT" -name '*.ko' -exec $STRIP --strip-debug {} +
 install -m755 "$B/busybox-arm64" "$OUT/usr/local/bin/busybox-zboot"
 install -m755 "$ROOT/build/rild-lite" "$OUT/var/lib/zmodem/data/zril/rild-lite"
+install -m755 "$ROOT/build/rild-lite" "$Z/tools/rild-lite"	# the copy updates can replace (zmodem ril)
 
 # every module must load into this BOOT image's kernel (vermagic only, no MODVERSIONS)
 want=$(modinfo -F vermagic "$Z/modules/gpu-sched.ko")
