@@ -10,6 +10,10 @@
 # Added for OmonullOS, October 2026: CPU idle at boot (zrn-cpuidle) needed
 # a measure of the drain off the cable.
 
+# November 2026: zmon (zmon.py) took over; it writes this same CSV and a
+# fuller log in /var/lib/zmon. This loop stays as the fallback without it.
+[ -x /usr/local/bin/zmon ] && exec /usr/local/bin/zmon run
+
 D=/var/lib/zbattlog
 BUS=$(ls -d /sys/bus/platform/devices/15d60000.i2c/i2c-* 2>/dev/null | head -n1)
 BUS=${BUS##*/i2c-}

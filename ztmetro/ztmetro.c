@@ -61,6 +61,14 @@
  *   with the finger, its motions on iOS 26's spring (0.5 s); it is not there on Start, among the
  *   cards, over Hyperscan or the pulled-down panel (a swipe up there closes it), and it fades over
  *   any app left alone for 3 s.
+ * Modified for OmonullOS, November 2026: a client's events may wait up to 1 MiB in the
+ *   compositor (zdoze freezes idle apps; at libwayland's 4 KiB a frozen one was cut off).
+ * Modified for OmonullOS, November 2026: a screenshot on power + volume up (or "screenshot"
+ *   on the ctl pipe), read back from the GPU into ~/Pictures/Screenshots.
+ * Modified for OmonullOS, November 2026: the pill's three looks (config cutout_pill: outline,
+ *   icon, dot, off), with the app's tile icon.
+ * Modified for OmonullOS, November 2026: the app in front as a pill in its tile's colour
+ *   inside the camera hole's box (seen in screenshots only; ~/.config/ztmetro/no-cutout-pill).
  */
 #define _GNU_SOURCE
 #include "core/zrnboard.h"
@@ -221,6 +229,9 @@ static int line_ink_accent;	/* nav_line_color = accent: follows the accent */
 #define SAFE_AREA_MAX 16	/* apps that may say "safe area ID" */
 static bool nav_bar_on = true;
 static int nav_style;		/* 0 the buttons, 1 the line */
+/* OmonullOS: config cutout_pill, how the app in front is drawn in the camera hole */
+enum { PILL_OUTLINE, PILL_ICON, PILL_DOT, PILL_OFF };
+static int pill_style = PILL_OUTLINE;
 #define NAV_LINE	(nav_style == 1 && nav_bar_on && nav_h == 0)
 #define NAV_TOUCH	(NAV_LINE ? LINE_ZONE : NAV_H)	/* the bottom points that are the nav's */
 #define DEFAULT_KEY_HEIGHT 56
@@ -365,6 +376,7 @@ static int nav_style;		/* 0 the buttons, 1 the line */
 #define FONT_LIGHT	"Segoe UI Light, Selawik Light, Open Sans Light, sans-serif"
 #define FONT_SEMILIGHT	"Segoe UI Semilight, Selawik Semilight, Open Sans, sans-serif"
 #define FONT_REGULAR	"Segoe UI, Selawik, Open Sans, Noto Sans, sans-serif"
+#define FONT_PILL	"Rubik, Selawik, sans-serif Medium"	/* OmonullOS: the camera pill (owner's pick, 19.11.2026) */
 #define FONT_SEMIBOLD	"Segoe UI Semibold, Selawik Semibold, Open Sans Semibold, sans-serif"
 
 enum tile_size { TILE_SMALL, TILE_MEDIUM, TILE_WIDE };
@@ -856,6 +868,14 @@ struct zt_server {
 	struct zt_layer pm_layer, pm_knob_layer;
 	struct wl_event_source *pwr_timer;
 	bool pwr_down, pwr_woke, pwr_menu, pwr_ignore;
+	bool volup_down;		/* OmonullOS: for power + volume up */
+	uint32_t volup_ms;		/* when it went down */
+	bool volup_first;		/* its first step waits VOLUP_CHORD_MS for the power key */
+	bool shot_pending;		/* the next frame is saved (screenshot_take) */
+	uint32_t shot_flash;		/* when the screen's white flash began; 0 none */
+	char pill_name[64];		/* the app in front, for the pill in the camera hole */
+	char pill_icon[80];		/* its tile's (or list entry's) icon, as draw_glyph takes it */
+	uint32_t pill_color;
 	/* colour temperature: every pixel multiplied by this */
 	int tone_k;			/* Kelvin; 6500 is no change */
 	GLuint tone_tex;
@@ -3497,6 +3517,9 @@ static void load_config(struct zt_server *server) {
 			}
 		} else if (strcmp(key, "nav_style") == 0) {
 			nav_style = strcmp(value, "line") == 0 ? 1 : 0;
+		} else if (strcmp(key, "cutout_pill") == 0) {
+			pill_style = strcmp(value, "icon") == 0 ? PILL_ICON : strcmp(value, "dot") == 0 ? PILL_DOT :
+				strcmp(value, "off") == 0 ? PILL_OFF : PILL_OUTLINE;
 		} else if (strcmp(key, "nav_line_hide") == 0) {
 			int sec = atoi(value);
 			line_idle_ms = strcmp(value, "never") == 0 ? 0 : sec >= 1 && sec <= 60 ? sec * 1000 : 3000;
@@ -5922,6 +5945,8 @@ static bool on_charger(void) {
  * action centre has it: the charge in per cent under the battery and the date
  * under the clock.
  */
+static double status_row_dy(struct zt_server *server);
+
 static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool live) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	/* Sized against the screen, off photos of the real thing: the battery is
@@ -5929,7 +5954,9 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	 * digits are as tall as the battery. */
 	const double cell = round(server->width * 0.032 * 2) / 2;	/* battery cell height */
 	const double right = server->width - 14 - cutout_right;	/* Start's own side margin */
-	const double base = (STATUS_H + cell) / 2;	/* the baseline everything stands on */
+	/* the baseline everything stands on; a single row lines up with the
+	 * camera hole (and the pill in it), not the bar's middle */
+	const double base = (STATUS_H + cell) / 2 + (details ? 0 : status_row_dy(server));
 	double x = 14 + cutout_left;
 	const double arrow = cell * 0.4;
 	/* the mobile network first: an aeroplane with the radio off, else the
@@ -6214,6 +6241,208 @@ static bool status_moving(struct zt_server *server) {
 		want != server->st_arrow_at);
 }
 
+static const char *app_name(struct zt_toplevel *toplevel);
+
+/* OmonullOS, November 2026: the app in front, in its tile's colour, drawn
+ * into the box of the camera hole (ZTMETRO_CUTOUT @right). The glass has no
+ * pixels there, so it is seen in screenshots and recordings only. Off with
+ * ~/.config/ztmetro/no-cutout-pill. */
+static bool pill_on(void) {
+	static uint32_t looked;
+	static bool on = true;
+	uint32_t now = now_ms();
+	if (!looked || now - looked > 5000) {
+		char path[512];
+		const char *home = getenv("HOME");
+		snprintf(path, sizeof(path), "%s/.config/ztmetro/no-cutout-pill", home ? home : "");
+		on = access(path, F_OK) != 0;
+		looked = now ? now : 1;
+	}
+	return on;
+}
+
+/* ~/.config/ztmetro/cutout-pill: "X Y W H" in the panel's pixels, the
+ * camera hole's own box (smaller than ZTMETRO_CUTOUT's); missing: that box.
+ * ~/.config/ztmetro/cutout-grid there: a ruler over the box instead (10 px
+ * lines, every 50th coloured), to find the hole from a photo. Both looked at
+ * again by "pill" on the ctl pipe and every 5 s. */
+static double pill_px[4];	/* 0 0 0 0: not set */
+static bool pill_grid;
+static void pill_load(void) {
+	char path[512];
+	const char *home = getenv("HOME");
+	snprintf(path, sizeof(path), "%s/.config/ztmetro/cutout-pill", home ? home : "");
+	FILE *f = fopen(path, "r");
+	pill_px[0] = pill_px[1] = pill_px[2] = pill_px[3] = 0;
+	if (f) {
+		if (fscanf(f, "%lf %lf %lf %lf", &pill_px[0], &pill_px[1], &pill_px[2], &pill_px[3]) != 4 ||
+				pill_px[2] <= 0 || pill_px[3] <= 0) {
+			pill_px[2] = pill_px[3] = 0;
+		}
+		fclose(f);
+	}
+	/* the device's own (session.env): ZTMETRO_CUTOUT_HOLE="X Y W H" */
+	const char *hole = getenv("ZTMETRO_CUTOUT_HOLE");
+	if (pill_px[2] <= 0 && hole && (sscanf(hole, "%lf %lf %lf %lf", &pill_px[0], &pill_px[1],
+			&pill_px[2], &pill_px[3]) != 4 || pill_px[2] <= 0 || pill_px[3] <= 0)) {
+		pill_px[2] = pill_px[3] = 0;
+	}
+	snprintf(path, sizeof(path), "%s/.config/ztmetro/cutout-grid", home ? home : "");
+	pill_grid = access(path, F_OK) == 0;
+}
+
+static void pill_ruler(struct zt_server *server, cairo_t *cr) {
+	static const uint32_t colors[] = { 0xff3030, 0x30ff30, 0x3080ff, 0xffff30, 0xff30ff, 0x30ffff };
+	const double k = server->scale, x0 = server->width - cutout_right;
+	const int pw = (int)lround(cutout_right * k), ph = (int)lround(STATUS_H * k);
+	const int left = (int)lround(x0 * k);
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_rectangle(cr, x0, 0, cutout_right, STATUS_H);
+	cairo_fill(cr);
+	for (int from_right = 0; from_right <= pw; from_right += 10) {	/* columns, from the right edge */
+		int px = pw - from_right;
+		bool major = from_right % 50 == 0;
+		if (major) set_rgb(cr, colors[(from_right / 50) % 6]); else cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		cairo_set_line_width(cr, (major ? 3.0 : 1.0) / k);
+		cairo_move_to(cr, (left + px + 0.5) / k, 0);
+		cairo_line_to(cr, (left + px + 0.5) / k, STATUS_H);
+		cairo_stroke(cr);
+	}
+	for (int py = 0; py <= ph; py += 10) {	/* rows, from the top */
+		bool major = py % 50 == 0;
+		if (major) set_rgb(cr, colors[(py / 50 + 3) % 6]); else cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		cairo_set_line_width(cr, (major ? 3.0 : 1.0) / k);
+		cairo_move_to(cr, x0, (py + 0.5) / k);
+		cairo_line_to(cr, server->width, (py + 0.5) / k);
+		cairo_stroke(cr);
+	}
+	cairo_restore(cr);
+}
+
+static void pill_refresh(void) {
+	static uint32_t looked;
+	if (!looked || now_ms() - looked > 5000) {
+		pill_load();
+		looked = now_ms() ? now_ms() : 1;
+	}
+}
+
+/* points the status row moves down so that its middle is the hole's */
+static double status_row_dy(struct zt_server *server) {
+	pill_refresh();
+	if (pill_px[3] <= 0 || cutout_right <= 0 || !(server->scale > 0.0f)) {
+		return 0;
+	}
+	double dy = (pill_px[1] + pill_px[3] / 2) / server->scale - STATUS_H / 2.0;
+	return fmax(0, fmin(dy, STATUS_H / 4.0));
+}
+
+static void pill_draw(struct zt_server *server, cairo_t *cr) {
+	pill_refresh();
+	if (cutout_right <= 0) {
+		return;
+	}
+	if (pill_grid) {
+		pill_ruler(server, cr);
+		return;
+	}
+	if (!server->pill_name[0] || !pill_on() || pill_style == PILL_OFF) {
+		return;
+	}
+	const double pad = 3;
+	double h = STATUS_H - 2 * pad, w = cutout_right - 2 * pad;
+	double x = server->width - cutout_right + pad, y = pad;
+	if (pill_px[2] > 0) {
+		x = pill_px[0] / server->scale;
+		y = pill_px[1] / server->scale;
+		w = pill_px[2] / server->scale;
+		h = pill_px[3] / server->scale;
+	}
+	const double r = fmin(h, w) / 2, cy = y + h / 2;
+	/* the tile's colour, lighter for lines and text on black */
+	uint32_t c = server->pill_color, bright = 0;
+	for (int k = 0; k < 24; k += 8) {
+		unsigned v = (c >> k & 255) * 13 / 10;
+		bright |= (v > 255 ? 255 : v) << k;
+	}
+	cairo_new_sub_path(cr);
+	if (pill_style == PILL_OUTLINE) {
+		double lw = h * 0.055, i = lw / 2 + h * 0.03;
+		cairo_arc(cr, x + w - r, cy, r - i, -M_PI / 2, M_PI / 2);
+		cairo_arc(cr, x + r, cy, r - i, M_PI / 2, 3 * M_PI / 2);
+		cairo_close_path(cr);
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_fill_preserve(cr);
+		cairo_set_line_width(cr, lw);
+		set_rgb(cr, bright);
+		cairo_stroke(cr);
+	} else {
+		cairo_arc(cr, x + w - r, cy, r, -M_PI / 2, M_PI / 2);
+		cairo_arc(cr, x + r, cy, r, M_PI / 2, 3 * M_PI / 2);
+		cairo_close_path(cr);
+		if (pill_style == PILL_ICON) {
+			set_rgb(cr, c);
+		} else {
+			cairo_set_source_rgb(cr, 0.08, 0.08, 0.08);
+		}
+		cairo_fill(cr);
+	}
+	double tx = x + r * 0.6, tw = w - r * 1.2;	/* where the name goes */
+	if (pill_style == PILL_ICON) {
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		draw_glyph(server, cr, server->pill_icon, server->pill_name, x + w / 2, cy, h * 0.62);
+		return;
+	} else if (pill_style == PILL_OUTLINE) {
+		set_rgb(cr, bright);
+		draw_glyph(server, cr, server->pill_icon, server->pill_name, x + r + h * 0.04, cy, h * 0.52);
+		tx = x + h + h * 0.04;
+		tw = w - h - r * 0.6;
+	} else {	/* PILL_DOT */
+		set_rgb(cr, bright);
+		cairo_arc(cr, x + r, cy, h * 0.14, 0, 2 * M_PI);
+		cairo_fill(cr);
+		tx = x + r + h * 0.24;
+		tw = w - r - h * 0.24 - r * 0.5;
+	}
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	double size = h * 0.44;
+	while (size > 7 && text_width(server->pill_name, FONT_PILL, size) > tw) {
+		size -= 0.5;
+	}
+	draw_text(cr, server->pill_name, FONT_PILL, size, tx, y, tw, h, true);
+}
+
+/* the pill's name and colour for `app` (NULL: Start, no pill): its tile's,
+ * else its entry in the list with the accent, else its app id's last part */
+static void pill_for(struct zt_server *server, struct zt_toplevel *app) {
+	server->pill_name[0] = 0;
+	snprintf(server->pill_icon, sizeof(server->pill_icon), "@-");	/* none: its initial */
+	server->pill_color = server->accent;
+	if (!app || !app->xdg_toplevel) {
+		return;
+	}
+	int i = app->launch_command[0] ? tile_of(server, app->launch_command) : -1;
+	if (i >= 0) {
+		snprintf(server->pill_name, sizeof(server->pill_name), "%s", server->tiles[i].label);
+		snprintf(server->pill_icon, sizeof(server->pill_icon), "%s", server->tiles[i].icon);
+		server->pill_color = server->tiles[i].color;
+		return;
+	}
+	for (int k = 0; k < server->n_items; k++) {
+		struct app_item *item = &server->items[k];
+		if (!item->header && app->launch_command[0] && !strcmp(item->command, app->launch_command)) {
+			snprintf(server->pill_name, sizeof(server->pill_name), "%s", item->name);
+			if (item->key[0] && strcmp(item->key, "-") != 0) {
+				snprintf(server->pill_icon, sizeof(server->pill_icon), "@%s", item->key);
+			}
+			return;
+		}
+	}
+	const char *id = app_name(app), *dot = strrchr(id, '.');
+	snprintf(server->pill_name, sizeof(server->pill_name), "%s", dot && dot[1] ? dot + 1 : id);
+}
+
 static void draw_status(struct zt_server *server) {
 	status_want(server);
 	server->st_drawn[0] = server->st_wifi;
@@ -6230,6 +6459,7 @@ static void draw_status(struct zt_server *server) {
 		signal_sweep_kick(server);
 	} else {
 		status_row(server, cr, false, true);
+		pill_draw(server, cr);
 	}
 	zt_buffer_show(server, &server->status_layer, buffer, cr, server->width, STATUS_H);
 	bool in_shade = server->shade_open || server->shade_h > 0.1f;
@@ -6578,7 +6808,7 @@ static void draw_lock(struct zt_server *server) {
 /* The system sounds (sounds/ztos-sounds.c plays them, indices as its
  * files[]): Windows Phone's own, from its sound kit. */
 enum ui_sound { UIS_KEY, UIS_SPACE, UIS_FUNCTION, UIS_LOCK, UIS_UNLOCK, UIS_NOTIFY,
-	UIS_COPY, UIS_MENU, UIS_BATTERY_LOW, UIS_PIP };
+	UIS_COPY, UIS_MENU, UIS_BATTERY_LOW, UIS_PIP, UIS_SHUTTER = 22 };
 
 /* Played at the ring volume, and not at all with it at zero. */
 static void ui_sound(struct zt_server *server, enum ui_sound sound) {
@@ -8170,6 +8400,7 @@ static void start_turn(struct zt_server *server, bool away, uint32_t delay) {
 
 static void perf_tell(const char *command);
 static pid_t toplevel_pid(struct zt_toplevel *toplevel);
+static void screenshot_take(struct zt_server *server);
 
 /* In a child about to become something else: none of the shell's own place
  * in line for the CPU (zrnperfd raises it) goes with it. Lowering one's own
@@ -8315,6 +8546,8 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
     server->android_compiling = false;
 	if (toplevel != previous) {
 		perf_focus(toplevel);
+		pill_for(server, toplevel);
+		draw_status(server);
 	}
 	if (!toplevel) {
         server->pending_command[0] = 0;
@@ -11665,8 +11898,18 @@ static void volume_step(struct zt_server *server, int by) {
 }
 
 /* A held volume key steps on, as on a phone: after 400 ms, every 90 ms. */
+#define VOLUP_CHORD_MS	150	/* as Android's screenshot chord waits */
 static int volume_repeat(void *data) {
     struct zt_server *server = data;
+    if (server->volup_first) {
+        /* volume up's own step, after the wait for the power key */
+        server->volup_first = false;
+        if (server->volume_repeat_by && server->screen_on) {
+            volume_step(server, server->volume_repeat_by);
+            wl_event_source_timer_update(server->volume_repeat_timer, 400 - VOLUP_CHORD_MS);
+        }
+        return 0;
+    }
     if (!server->volume_repeat_by || !server->screen_on) {
         server->volume_repeat_by = 0;	/* the key-up may never come with the screen off */
         return 0;
@@ -14202,6 +14445,11 @@ static void ctl_command(struct zt_server *server, char *line) {
 		}
 		server->ftrace_until = now_ms() + (uint32_t)id;
 		damage(server);
+	} else if (strcmp(line, "screenshot") == 0) {
+		screenshot_take(server);
+	} else if (strcmp(line, "pill") == 0) {
+		pill_load();
+		draw_status(server);
 	} else if (sscanf(line, "recordtop %d", &id) == 1) {
 		mkdir("/tmp/ztrec", 0755);
 		server->record_top = true;
@@ -14449,6 +14697,107 @@ static bool hardware_nav_keys(void) {
 	return back && home;
 }
 
+/* OmonullOS, November 2026: a screenshot, power + volume up (the owner's
+ * volume down key is worn), or "screenshot" on the ctl pipe. The next frame
+ * is drawn by the GPU (no display plane, so the app is in it) and read back
+ * into ordinary memory; a thread writes the PNG to ~/Pictures/Screenshots.
+ * grim cannot: wlroots' screencopy asks for a scanout-sized buffer from CMA,
+ * which is nearly always used up here. */
+struct shot_job {
+	uint8_t *rgba;
+	int w, h;
+	float tint[3];	/* the frame's darkening (brightness, night light): undone */
+	char path[512];
+};
+
+static void *shot_write(void *arg) {
+	struct shot_job *job = arg;
+	/* RGBA bytes, rows top first (the output buffer's own order) -> cairo's
+	 * native-endian xRGB */
+	uint32_t *px = (uint32_t *)job->rgba;
+	size_t n = (size_t)job->w * job->h;
+	/* the software brightness darkens every quad (frame_tint): the picture is
+	 * of what the app drew, so each channel is divided by it again */
+	uint8_t lut[3][256];
+	for (int k = 0; k < 3; k++) {
+		float t = job->tint[k] > 0.05f ? job->tint[k] : 1.0f;
+		for (int v = 0; v < 256; v++) {
+			float o = v / t + 0.5f;
+			lut[k][v] = o > 255.0f ? 255 : (uint8_t)o;
+		}
+	}
+	for (size_t i = 0; i < n; i++) {
+		const uint8_t *c = job->rgba + i * 4;
+		px[i] = 0xff000000u | (uint32_t)lut[0][c[0]] << 16 | (uint32_t)lut[1][c[1]] << 8 | lut[2][c[2]];
+	}
+	cairo_surface_t *img = cairo_image_surface_create_for_data(job->rgba, CAIRO_FORMAT_RGB24,
+		job->w, job->h, job->w * 4);
+	cairo_status_t st = cairo_surface_write_to_png(img, job->path);
+	cairo_surface_destroy(img);
+	if (st != CAIRO_STATUS_SUCCESS) {
+		wlr_log(WLR_ERROR, "screenshot: %s: %s", job->path, cairo_status_to_string(st));
+	} else {
+		wlr_log(WLR_INFO, "screenshot: %s", job->path);
+	}
+	free(job->rgba);
+	free(job);
+	return NULL;
+}
+
+#define SHOT_FLASH_MS 450
+#define SHOT_GLOW_BANDS 8
+#define SHOT_GLOW_BAND 1.5f	/* points each: a glow 12 points deep */
+
+static void screenshot_take(struct zt_server *server) {
+	if (server->shot_pending || !server->screen_on) {
+		return;
+	}
+	server->shot_pending = true;
+	/* the S10 5G has no vibrator driver: a flash and a shutter say it too */
+	hap(server, HAP_CLICK, HG_SYSTEM);
+	ui_sound(server, UIS_SHUTTER);
+	damage(server);
+}
+
+/* in render_frame, the frame complete in the bound framebuffer */
+static void screenshot_read(struct zt_server *server, int w, int h) {
+	server->shot_pending = false;
+	struct shot_job *job = calloc(1, sizeof(*job));
+	if (job) {
+		job->rgba = malloc((size_t)w * h * 4);
+	}
+	if (!job || !job->rgba) {
+		wlr_log(WLR_ERROR, "screenshot: no memory for %dx%d", w, h);
+		free(job);
+		return;
+	}
+	job->w = w;
+	job->h = h;
+	for (int k = 0; k < 3; k++) {
+		job->tint[k] = server->tint[k];
+	}
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, job->rgba);
+	const char *home = getenv("HOME");
+	char dir[400];
+	snprintf(dir, sizeof(dir), "%s/Pictures", home ? home : "/tmp");
+	mkdir(dir, 0755);
+	strncat(dir, "/Screenshots", sizeof(dir) - strlen(dir) - 1);
+	mkdir(dir, 0755);
+	time_t t = time(NULL);
+	struct tm tm;
+	localtime_r(&t, &tm);
+	char stamp[32];
+	strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tm);
+	snprintf(job->path, sizeof(job->path), "%s/Screenshot_%s.png", dir, stamp);
+	pthread_t th;
+	if (pthread_create(&th, NULL, shot_write, job) == 0) {
+		pthread_detach(th);
+	} else {
+		free(job->rgba);
+		free(job);
+	}
+}
+
 static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
 	struct zt_server *server = keyboard->server;
@@ -14461,6 +14810,21 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 			if (server->pm_open) {
 				pm_close(server);
 				server->pwr_ignore = true;
+				return;
+			}
+			if (server->screen_on && server->volup_down) {
+				/* volume up first: the screenshot, and its volume step undone
+				 * when the two came together */
+				server->pwr_down = true;
+				server->pwr_ignore = true;
+				bool stepped = !server->volup_first;
+				server->volup_first = false;
+				server->volume_repeat_by = 0;
+				wl_event_source_timer_update(server->volume_repeat_timer, 0);
+				if (stepped && now_ms() - server->volup_ms < 1000) {
+					volume_step(server, -1);
+				}
+				screenshot_take(server);
 				return;
 			}
 			server->pwr_down = true;
@@ -14481,6 +14845,21 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 			server->pwr_down = false;
 		}
 		return;
+	}
+	if (event->keycode == KEY_VOLUMEUP) {
+		bool down = event->state == WL_KEYBOARD_KEY_STATE_PRESSED;
+		server->volup_down = down;
+		if (down) {
+			server->volup_ms = now_ms();
+		}
+		if (down && server->pwr_down && server->screen_on && !server->pwr_woke) {
+			/* power first: the screenshot, and neither the power key's
+			 * release (screen off) nor its hold (the menu) */
+			wl_event_source_timer_update(server->pwr_timer, 0);
+			server->pwr_ignore = true;
+			screenshot_take(server);
+			return;
+		}
 	}
 	if (event->keycode == KEY_VOLUMEDOWN &&
 	    event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -14538,11 +14917,22 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 				/* Volume down is handled above; volume up is suppressed too. */
 			} else {
 				server->volume_repeat_by = 0;
-				volume_step(server, event->keycode == KEY_VOLUMEUP ? 1 : -1);
-				server->volume_repeat_by = event->keycode == KEY_VOLUMEUP ? 1 : -1;
-				wl_event_source_timer_update(server->volume_repeat_timer, 400);
+				if (event->keycode == KEY_VOLUMEUP) {
+					/* power may follow: a screenshot, and no volume */
+					server->volup_first = true;
+					server->volume_repeat_by = 1;
+					wl_event_source_timer_update(server->volume_repeat_timer, VOLUP_CHORD_MS);
+				} else {
+					volume_step(server, -1);
+					server->volume_repeat_by = -1;
+					wl_event_source_timer_update(server->volume_repeat_timer, 400);
+				}
 			}
 		} else {
+			if (server->volup_first && server->volume_repeat_by == 1) {
+				volume_step(server, 1);	/* a tap shorter than the wait */
+			}
+			server->volup_first = false;
 			server->volume_repeat_by = 0;
 			wl_event_source_timer_update(server->volume_repeat_timer, 0);
 		}
@@ -15376,7 +15766,8 @@ static void render_frame(struct zt_server *server) {
 	if (app && app->mapped && !dm_lock) {
 		app_origin(app, &draw.ox, &draw.oy);
 		draw.fit = app_fit(server, app);
-		plane = plane_pick(server, app, &draw, app_covers, &plane_state);
+		plane = !server->shot_pending && !server->shot_flash &&
+			plane_pick(server, app, &draw, app_covers, &plane_state);
 	}
 	if (plane) {
 		wlr_output_state_set_buffer(&state, buffer);
@@ -15952,6 +16343,43 @@ static void render_frame(struct zt_server *server) {
 			}
 		}
 	}
+	if (server->shot_pending) {
+		glFinish();
+		screenshot_read(server, output->width, output->height);
+		server->shot_flash = now ? now : 1;
+	}
+	bool flash_more = false;
+	if (server->shot_flash) {
+		/* drawn after the read: the picture has no flash in it. A glow along
+		 * the screen's edges (as One UI does), not a white screen: bands
+		 * fainter inwards, the whole fading out */
+		uint32_t age = now - server->shot_flash;
+		if (age < SHOT_FLASH_MS) {
+			float k = 1.0f - (float)age / SHOT_FLASH_MS;
+			float W = server->width, H = server->height;
+			for (int b = 0; b < SHOT_GLOW_BANDS; b++) {
+				float in = b * SHOT_GLOW_BAND, t = SHOT_GLOW_BAND;
+				float f = 1.0f - (float)b / SHOT_GLOW_BANDS;
+				float a = 0.85f * k * f * f;
+				const float r[4][4] = {
+					{ in, in, W - 2 * in, t },		/* top */
+					{ in, H - in - t, W - 2 * in, t },	/* bottom */
+					{ in, in + t, t, H - 2 * (in + t) },	/* left */
+					{ W - in - t, in + t, t, H - 2 * (in + t) },	/* right */
+				};
+				for (int e = 0; e < 4; e++) {
+					float m[16];
+					mat_identity(m);
+					mat_translate(m, r[e][0], r[e][1]);
+					mat_scale(m, r[e][2], r[e][3]);
+					quad(server, GL_TEXTURE_2D, server->white_tex, m, a, false, false, 1.0f, 1.0f);
+				}
+			}
+		} else {
+			server->shot_flash = 0;
+		}
+		flash_more = true;	/* the next step, or one frame without it */
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	struct timespec t1, t2, t3;
 	clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -15988,6 +16416,9 @@ static void render_frame(struct zt_server *server) {
 	}
 	wlr_output_state_finish(&state);
 	server->dirty = false;
+	if (flash_more) {
+		damage(server);
+	}
 	if (server->board_more) {
 		server->board_more = false;
 		damage(server);
@@ -16650,6 +17081,12 @@ int main(int argc, char *argv[]) {
 	setenv("PAN_MESA_DEBUG", "noafbc,linear", true);
 
 	server.wl_display = wl_display_create();
+	/* OmonullOS, November 2026: zdoze freezes idle apps (cgroup freezer).
+	 * A frozen client does not read its socket; with libwayland's default
+	 * 4 KiB buffer the events queued for it (configure, output, data
+	 * offers, frame done) soon overflow and the client is disconnected.
+	 * Let them wait in the compositor instead, up to 1 MiB per client. */
+	wl_display_set_default_max_buffer_size(server.wl_display, 1 << 20);
 	server.loop = wl_display_get_event_loop(server.wl_display);
 	if (argc > 1) {
 		/* OmonullOS: anything else (--help) is answered here, before a

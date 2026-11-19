@@ -527,7 +527,16 @@ nettype = {'chosen': '', 'have': None, 'asked': None, 'due': 0}
 # The modem is told when the screen is off (RIL_REQUEST_SCREEN_STATE), as
 # Android does: with mobile data as the only network and the modem not told, its
 # network state messages woke the phone from every sleep within seconds.
+# With it, as Android's DeviceStateMonitor does: SET_UNSOLICITED_RESPONSE_FILTER
+# (139) with no bits while off (network state only when the registration or
+# radio tech changes, no signal) and SIGNAL_STRENGTH | FULL_NETWORK_STATE |
+# DATA_CALL_DORMANCY when on, and SEND_DEVICE_STATE (138) LOW_DATA_EXPECTED;
+# with 61 alone unsol 1002 still began most CP wakes (86 in 3.5 h on
+# 2026-11-19). The cell info list (unsol 1036), which nothing here reads, is
+# turned off (SET_UNSOL_CELL_INFO_LIST_RATE 110). Calls and messages are not
+# filtered. All of it again after unsol 1000 (the radio restarted).
 SCREEN_REQ = 61
+FILTER_ON, FILTER_OFF = 7, 0
 screen = {'told': None, 'due': 0}
 ANDROID_ROOT = '/run/android'
 ANDROID_LIBS = '/apex/com.android.i18n/lib64:/apex/com.android.runtime/lib64'
@@ -865,8 +874,15 @@ def screen_tick(t):
 		return
 	on = on or bool(call['state'])	# the ear darkens the screen in a call: nothing changes for the modem
 	if on != screen['told']:
+		if screen['told'] is None:
+			s.sendall(b'rawi 110 %d\n' % INVALID)
 		screen.update(told=on, due=0)
-		s.sendall(b'rawi %d %d\n' % (SCREEN_REQ, on))
+		s.sendall(b'rawi %d %d\nrawi 139 %d\nrawi 138 2 %d\n' % (SCREEN_REQ, on,
+			FILTER_ON if on else FILTER_OFF, not on))
+		print('screen %s: modem filter %d' % ('on' if on else 'off', FILTER_ON if on else FILTER_OFF), flush=True)
+		if on:
+			global due
+			due = min(due, t + 1)	# the state it did not send while off
 
 def screen_answer(ok):
 	if not ok:
@@ -1149,6 +1165,8 @@ try:
 			line = line.decode(errors='replace')
 			if re.match(r'! (1000|1002) ', line):
 				due = min(due, time.time() + 2)	# let the change settle
+				if line.startswith('! 1000 '):	# the radio restarted: tell it again
+					screen['told'] = None
 				continue
 			if line.startswith('! 1001 '):	# CALL_STATE_CHANGED
 				poll = time.time()

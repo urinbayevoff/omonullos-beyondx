@@ -1,0 +1,14 @@
+[Unit]
+Description=A terminal with work running keeps the phone awake (zdoze, beyondx)
+# OmonullOS, November 2026: scripts/zdoze.py as /usr/local/bin/zdoze. zsleepd
+# does not sleep while /run/zdoze/busy is fresh. Off switch: touch /etc/zdoze.off.
+Before=zsleepd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zdoze
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=graphical.target

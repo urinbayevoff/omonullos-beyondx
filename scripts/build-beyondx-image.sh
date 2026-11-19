@@ -203,11 +203,13 @@ for t in ztemp zbatt zcharge zthermal zchg zlowbatt zchgoff zbattlog zpdoff ztou
 	install -m755 "$K/$t.sh" "$R/usr/local/bin/$t"
 done
 install -m755 "$K/zacpm.py" "$R/usr/local/bin/zacpm"
+install -m755 "$K/zmon.py" "$R/usr/local/bin/zmon"
 install -m755 "$K/zgov.py" "$R/usr/local/bin/zgov"
 install -m755 "$K/gnome-terminal" "$R/usr/local/bin/gnome-terminal"
 # automatic system sleep (enabled by the overlay's relative link) and the
 # speaker's one-time calibration
 install -m755 "$SRC/scripts/zsleepd.sh" "$R/usr/local/bin/zsleepd"
+install -m755 "$SRC/scripts/zdoze.py" "$R/usr/local/bin/zdoze"	# zsleepd: a busy terminal
 install -m755 "$SRC/power/suspend/beyondx/zgpio.py" "$R/usr/local/bin/zgpio"	# zsleepd: charger wake
 install -m755 "$SRC/audio/beyondx/zspk-calibrate.sh" "$R/usr/local/bin/zspk-calibrate"
 install -Dm644 "$K/wdt-pet.sh" "$R/usr/local/lib/zboot/wdt-pet.sh"
@@ -233,6 +235,9 @@ done
 install -Dm644 "$SRC/audio/ringtone/omonullos-ring.wav" "$R/usr/local/share/sounds/ztos/ring/omonullos-ring.wav"
 install -d "$R/usr/local/share/fonts/selawik"
 install -m644 "$SRC"/os/fonts/selawik/*.ttf "$R/usr/local/share/fonts/selawik/"
+# Rubik (SIL OFL 1.1): the camera pill's name (ztMETRO FONT_PILL), 19.11.2026
+install -Dm644 "$SRC/os/fonts/rubik/Rubik-VF.ttf" "$R/usr/local/share/fonts/rubik/Rubik-VF.ttf"
+install -Dm644 "$SRC/os/fonts/rubik/OFL.txt" "$R/usr/local/share/fonts/rubik/OFL.txt"
 
 # the ztOS SDK, as on the phone
 rm -rf "$R/usr/local/lib/ztos-sdk"

@@ -143,6 +143,7 @@ enum action {
 	ACT_NAV_STYLE,	/* OmonullOS: arg 0 buttons, 1 the line */
 	ACT_NAV_HIDE,	/* OmonullOS: the line goes after: arg 0 never, 1 3 s, 2 5 s, 3 10 s */
 	ACT_NAV_INK,	/* OmonullOS: the line's colour: arg 0 auto, 1 white, 2 black, 3 accent */
+	ACT_PILL_STYLE,	/* OmonullOS: the camera hole's pill: arg an index in PILL_KEYS */
 	ACT_KEY_HEIGHT,
 	ACT_KEY_SOUND,
 	ACT_MOBILE_DATA,
@@ -255,6 +256,7 @@ static struct {
 	int nav_style;		/* OmonullOS: 0 buttons, 1 the line */
 	int nav_hide;		/* OmonullOS: index in NAV_HIDE_KEYS */
 	int nav_ink;		/* OmonullOS: index in NAV_INK_KEYS */
+	int pill_style;		/* OmonullOS: index in PILL_KEYS (the app's name in the camera hole) */
 	int scale_idx;
 
 	bool wifi_on, wifi_loading;
@@ -781,6 +783,8 @@ static int open_picker;
 /* OmonullOS: the line's settings, as the shell reads them */
 static const char *const NAV_HIDE_KEYS[] = { "never", "3", "5", "10" };
 static const char *const NAV_INK_KEYS[] = { "auto", "white", "black", "accent" };
+/* ztMETRO's cutout_pill: E (the default), C, H of the 19.11.2026 designs, or none */
+static const char *const PILL_KEYS[] = { "outline", "icon", "dot", "off" };
 static int key_index(const char *const *keys, int n, const char *val, int fallback) {
 	for (int i = 0; i < n; i++) {
 		if (strcmp(keys[i], val) == 0) return i;
@@ -810,6 +814,8 @@ static void config_load(void) {
 			int n = atoi(val); app.nav_icon_idx = n < 0 ? 0 : n > 4 ? 4 : n;
 		} else if (strcmp(key, "nav_style") == 0) {
 			app.nav_style = strcmp(val, "line") == 0;
+		} else if (strcmp(key, "cutout_pill") == 0) {
+			app.pill_style = key_index(PILL_KEYS, 4, val, 0);
 		} else if (strcmp(key, "nav_line_hide") == 0) {
 			app.nav_hide = key_index(NAV_HIDE_KEYS, 4, val, 1);
 		} else if (strcmp(key, "nav_line_color") == 0) {
@@ -1020,7 +1026,7 @@ static int language_picked = -1;
 
 static void config_save(void) {
 	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 27 + N_HAPTIC_GROUPS };
+	enum { N_KEYS = 28 + N_HAPTIC_GROUPS };
 	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
 		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
 		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
@@ -1065,6 +1071,8 @@ static void config_save(void) {
 	snprintf(keys[25 + N_HAPTIC_GROUPS].value, 32, "%s", NAV_HIDE_KEYS[app.nav_hide & 3]);
 	keys[26 + N_HAPTIC_GROUPS].key = "nav_line_color";
 	snprintf(keys[26 + N_HAPTIC_GROUPS].value, 32, "%s", NAV_INK_KEYS[app.nav_ink & 3]);
+	keys[27 + N_HAPTIC_GROUPS].key = "cutout_pill";
+	snprintf(keys[27 + N_HAPTIC_GROUPS].value, 32, "%s", PILL_KEYS[app.pill_style & 3]);
 	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
 	snprintf(keys[1].value, 32, "%d", app.columns);
 	snprintf(keys[2].value, 32, "%s", app.haptics ? "on" : "off");
@@ -2337,7 +2345,10 @@ static double draw_theme(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Changing it restarts the shell and closes open apps", FONT_REGULAR, 12, MARGIN, y + 42, zmc.width - 2 * MARGIN);
 	y += 20;
-	y = draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
+	/* OmonullOS: the app in front, drawn in the camera hole (screenshots only) */
+	static const char *const pills[] = { "Outline with icon", "Icon only", "Dot and name", "Off" };
+	y = picker(cr, y + 60, "App name at the camera", pills, 4, app.pill_style, ACT_PILL_STYLE);
+	y = draw_wall_row(cr, y);
 
 	/* OmonullOS: the rest of the Commons wallpapers, downloaded on request */
 	bool commons_busy = commons_available() && dl_read(&commons_dl);
@@ -3898,7 +3909,7 @@ static bool is_picker(int action) {
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_LANGUAGE: case ACT_DATE_REGION: case ACT_DATE_LANG:
-	case ACT_EMOJI: case ACT_NAV_STYLE: case ACT_NAV_HIDE: case ACT_NAV_INK:
+	case ACT_EMOJI: case ACT_NAV_STYLE: case ACT_NAV_HIDE: case ACT_NAV_INK: case ACT_PILL_STYLE:
 		return true;
 	}
 	return action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST;
@@ -3998,8 +4009,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_NAV_HIDE:
 	case ACT_NAV_INK:
+	case ACT_PILL_STYLE:
 		if (arg >= 0 && arg < 4) {
 			if (action == ACT_NAV_HIDE) app.nav_hide = arg;
+			else if (action == ACT_PILL_STYLE) app.pill_style = arg;
 			else app.nav_ink = arg;
 			config_save();	/* the shell takes it on SIGHUP */
 			zmc_redraw();

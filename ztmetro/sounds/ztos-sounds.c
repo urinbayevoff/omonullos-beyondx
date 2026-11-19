@@ -21,7 +21,7 @@
 #define IDLE_MS 500
 struct sound { int16_t *pcm; size_t frames; };
 struct voice { int sound; size_t position; double gain; uint64_t age; bool active; };
-#define SOUNDS 22
+#define SOUNDS 23
 #define SOUND_DTMF 10	/* the keypad's twelve, cut short: a press is a blip, one at a time */
 #define DTMF_FRAMES (RATE*150/1000)
 #define DTMF_FADE (RATE*10/1000)
@@ -45,6 +45,7 @@ static const char *const files[SOUNDS] = {
  "phone/dtmf0.wav", "phone/dtmf1.wav", "phone/dtmf2.wav", "phone/dtmf3.wav", "phone/dtmf4.wav",
  "phone/dtmf5.wav", "phone/dtmf6.wav", "phone/dtmf7.wav", "phone/dtmf8.wav", "phone/dtmf9.wav",
  "phone/dtmfast.wav", "phone/dtmfpd.wav",
+ "system/shutter.wav",
 };
 
 static uint64_t now_ms(void) {

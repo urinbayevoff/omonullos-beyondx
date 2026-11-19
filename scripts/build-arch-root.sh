@@ -108,6 +108,7 @@ if [ "$DEVICE" = beyondx ]; then
 		install -m 755 "$K/$t.sh" "$R/usr/local/bin/$t"
 	done
 	install -m 755 "$K/zacpm.py" "$R/usr/local/bin/zacpm"
+	install -m 755 "$K/zmon.py" "$R/usr/local/bin/zmon"
 	install -m 755 "$K/zgov.py" "$R/usr/local/bin/zgov"
 	install -m 755 "$K/ztouch.sh" "$R/usr/local/bin/ztouch"
 	install -m 755 "$K/zgpu.sh" "$R/usr/local/bin/zgpu"

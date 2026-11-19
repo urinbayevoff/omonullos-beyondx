@@ -995,6 +995,11 @@
 { "After 5 seconds", "5 soniyadan keyin" },
 { "After 10 seconds", "10 soniyadan keyin" },
 { "Line colour", "Çiziq rangi" },
+/* settings: the app's name at the camera hole (OmonullOS, 19.11.2026) */
+{ "App name at the camera", "Kamera yonida ilova nomi" },
+{ "Outline with icon", "Kontur va ikonka" },
+{ "Icon only", "Faqat ikonka" },
+{ "Dot and name", "Nuqta va nom" },
 { "Automatic (by the background)", "Avtomatik (fonga qarab)" },
 { "White", "Oq" },
 { "Black", "Qora" },

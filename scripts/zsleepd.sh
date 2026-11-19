@@ -13,6 +13,14 @@
 set -u
 DELAY=${DELAY:-30}
 RESLEEP=${RESLEEP:-20}
+# step 5 of the app sleep plan (19.11): after a CP wake that brought only
+# network news (RIL unsols in NET_UNSOL: network state, signal, data call
+# list, cell info, IMS state; with Wi-Fi off and data on these came every
+# ~25 s), sleep again once the modem has been quiet QUIET s, at the earliest
+# RESLEEP_NET s after the wake. An SMS, a call or anything else: RESLEEP.
+RESLEEP_NET=${RESLEEP_NET:-3}
+QUIET=${QUIET:-4}
+NET_UNSOL=" 1002 1009 1010 1036 1037 "
 TICK=5
 WIFI_PCI=0000:01:00.0
 WIFI_BRIDGE=0000:00:00.0	# its root port
@@ -26,6 +34,7 @@ AMP=/sys/module/snd_zrn_abox_bx/parameters
 OFF=/etc/zsleepd.off
 LOG=/var/lib/zsleep/zsleepd.log
 STATUS=/run/zsleepd.status
+DOZE=/run/zdoze/busy
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 mkdir -p /var/lib/zsleep
 
@@ -115,12 +124,19 @@ busy() {
 	[ "$(cat $AMP/call 2>/dev/null)" = 0 ] || { echo "call audio"; return; }
 	grep -qs RUNNING /proc/asound/card*/pcm*/sub*/status && { echo "sound"; return; }
 	local u; u=$(cat /sys/class/udc/*/state 2>/dev/null | head -1)
-	[ -n "$u" ] && [ "$u" != "not attached" ] && { echo "usb $u"; return; }
+	# 19.11: "default" stayed after a charger was pulled out and kept the
+	# phone awake 12 min; with no VBUS (zlowbatt, below) there is no cable
+	if [ -n "$u" ] && [ "$u" != "not attached" ]; then
+		[ "$u" = default ] && [ "$(cat /run/zbatt/online 2>/dev/null)" = 0 ] || { echo "usb $u"; return; }
+	fi
 	# a charger: the MAX77705's charger watchdog is kicked only while awake
 	# (wdt-pet.sh, every 20 s); asleep it runs out and charging stops (owner
 	# 15.11: asleep on the charger, no charge). zlowbatt writes /run/zbatt/online
 	# (CHGIN valid) every 10 s.
 	[ "$(cat /run/zbatt/online 2>/dev/null)" = 1 ] && { echo "charger"; return; }
+	# a terminal with work running (zdoze, the owner's rule of 18.11): it
+	# rewrites the file every 5 s while busy, so one left behind does not count
+	[ -n "$(find $DOZE -newermt '-15 seconds' 2>/dev/null)" ] && { echo "terminal $(head -c 120 $DOZE)"; return; }
 	pgrep -x pacman >/dev/null && { echo "pacman"; return; }
 	pgrep -f zsleep-4a.sh >/dev/null && { echo "zsleep-4a"; return; }
 	systemctl -q is-active zfield-push.service && { echo "zfield push"; return; }
@@ -142,21 +158,37 @@ sleep_once() {
 	# it, last of all: once unbound, giving up loses it (14.11 15:26 and 15:44,
 	# the screen lit in that second: FLR + bind "MMIO read failed"; a dry-run
 	# suspend did not bring it back and left the 5G modem in D3cold)
+	# the kernel's wakeup event count from here (Android's libsuspend way): an
+	# incoming call 0.4 s after the last look below was slept through for 14 s
+	# (19.11 13:54:07); the count written back before the suspend fails if a
+	# wakeup event (the CP's umts_ipc0 and others) came since, and the kernel
+	# aborts a suspend for one after it. Blocks while a source is active.
+	local wc; wc=$(timeout 3 cat /sys/power/wakeup_count 2>/dev/null)
 	why=$(busy)
+	[ -z "$why" ] && [ -z "$wc" ] && why="a wakeup source active"
 	if [ -z "$why" ]; then
 		echo $WIFI_PCI > /sys/bus/pci/drivers/brcmfmac/unbind 2>/dev/null; unbound=1
 		why=$(busy)
 	fi
 	if [ -z "$why" ]; then
 		chg_arm; armed=$?
-		echo 0 > $P/dry_run && echo 0 > $P/prepare_only
-		sync
-		t0=$(date +%s.%N)
-		echo mem > /sys/power/state; rc=$?
-		t1=$(date +%s.%N)
-		echo 1 > $P/prepare_only; echo 1 > $P/dry_run
-		# what woke it: INTSRC set = the MAX77705 (a key leaves it 0)
-		intsrc=$(i2cget -y $I2C 0x66 0x22 2>/dev/null)
+		if echo "$wc" > /sys/power/wakeup_count 2>/dev/null; then
+			echo 0 > $P/dry_run && echo 0 > $P/prepare_only
+			sync
+			t0=$(date +%s.%N)
+			echo mem > /sys/power/state; rc=$?
+			t1=$(date +%s.%N)
+			# the kernel aborted it for a wakeup event that came after the
+			# count was written (19.11 15:39:16, 0.0 s): not a failure
+			if [ "$rc" != 0 ] && [ "$(timeout 1 cat /sys/power/wakeup_count 2>/dev/null)" != "$wc" ]; then
+				why="a wakeup event while suspending"; rc=-1
+			fi
+			echo 1 > $P/prepare_only; echo 1 > $P/dry_run
+			# what woke it: INTSRC set = the MAX77705 (a key leaves it 0)
+			intsrc=$(i2cget -y $I2C 0x66 0x22 2>/dev/null)
+		else
+			why="a wakeup event since count $wc"; rc=-1; t0=0; t1=0
+		fi
 		chg_disarm
 	else
 		rc=-1; t0=0; t1=0
@@ -216,18 +248,40 @@ sleep_once() {
 	return 0
 }
 
-off_since=0; woke=0; wifi_said=0
+# the RIL unsols since $1 (epoch s): 0 = only network news and the modem
+# quiet for QUIET s, 1 = something else came (or none: not known), 2 = wait
+net_only() {
+	journalctl -u zril -o short-unix -q --since "@$1" 2>/dev/null | awk -v net="$NET_UNSOL" \
+		-v now="$(date +%s.%N)" -v quiet="$QUIET" '
+		$4 == "!" { n++; last = $1; if (index(net, " " $5 " ") == 0) other = 1 }
+		END { if (other || !n) exit 1; if (now - last < quiet) exit 2; exit 0 }'
+}
+
+off_since=0; woke=0; wifi_said=0; held=""; fast=0; att=0
 while :; do
-	sleep $TICK
+	# after a wake that may be network news only, look every second
+	if [ "$fast" = 1 ]; then sleep 1; else sleep $TICK; fi
 	now=$(date +%s)
 	if ! screen_off; then
-		off_since=0; woke=0
+		off_since=0; woke=0; held=""; fast=0
 		continue
 	fi
 	[ "$off_since" = 0 ] && off_since=$now
 	wait=$DELAY; [ "$woke" = 1 ] && wait=$RESLEEP
+	[ $((now - off_since)) -ge $RESLEEP ] && fast=0	# no journal reads every second while busy
+	if [ "$fast" = 1 ] && [ $((now - off_since)) -ge $RESLEEP_NET ]; then
+		net_only $((att - 1)); case $? in
+		0) wait=$RESLEEP_NET; fast=0; fastn=1 ;;
+		1) fast=0 ;;	# not network news only: RESLEEP
+		esac
+	fi
 	[ $((now - off_since)) -ge $wait ] || continue
 	why=$(busy)
+	# what keeps it awake, once per kind (19.11: a stuck USB state went unseen)
+	if [ "${why%% *}" != "${held%% *}" ]; then
+		[ -n "$why" ] && say "awake: $why"
+		held=$why
+	fi
 	if [ -n "$why" ]; then
 		continue
 	fi
@@ -241,7 +295,10 @@ while :; do
 		say "5 failures in a row: resting 5 min"
 		sleep 300; fails=0; continue
 	fi
+	att=$(date +%s)
+	[ "${fastn:-0}" = 1 ] && say "resleep: network news only"
+	fastn=0
 	sleep_once
 	# back from sleep (or not slept): count the screen-off time again from now
-	off_since=$(date +%s); woke=1
+	off_since=$(date +%s); woke=1; fast=1
 done

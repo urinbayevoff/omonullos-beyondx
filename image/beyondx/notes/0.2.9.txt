@@ -1,0 +1,5 @@
+• Batareya: ekran öçganda fondagi ilovalar va terminal uxlaydi, modem tinç turadi — telefon uyquda ancha uzoq turadi.
+• Skrinşot: quvvat + ovoz tepaga. Ekran çetlari yorişadi va «çiq» ovozi çiqadi.
+• Kamera teşigi yonida oldingi ilova nomi (skrinşotlarda körinadi). Körinişi: Sozlamalar > mavzu.
+• Yangi şrift Rubik (ilova nomi uçun).
+• Telefonni qayta yoqing.

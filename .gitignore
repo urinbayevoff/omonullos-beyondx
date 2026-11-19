@@ -62,6 +62,8 @@ ztmetro/browser/superscan
 # Windows Phone UI sounds (from the OS Sound Kit): Microsoft's audio, not ours to
 # redistribute; copied onto the phone locally, kept out of the public repository
 os/overlay/usr/local/share/sounds/ztos/system/*.wav
+# ours (synthesized for OmonullOS), free to share
+!os/overlay/usr/local/share/sounds/ztos/system/shutter.wav
 
 # Local phone sound pack and third-party Lumia ringtones; do not redistribute.
 os/overlay/usr/local/share/sounds/ztos/phone/
